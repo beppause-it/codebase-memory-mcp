@@ -467,6 +467,14 @@ int cbm_store_graph_topology_digest(cbm_store_t *s, const char *project, unsigne
 /* Get the last error message (static string, valid until next call). */
 const char *cbm_store_error(cbm_store_t *s);
 
+/* Borrowed, untruncated SQLite diagnostic for the most recent operation.
+ * Copy before any other store call or close. Does not expose the DB handle. */
+typedef struct {
+    int sqlite_code;
+    const char *sqlite_message;
+} cbm_store_diagnostic_t;
+cbm_store_diagnostic_t cbm_store_diagnostic(cbm_store_t *s);
+
 /* ── Transaction ────────────────────────────────────────────────── */
 
 /* Begin a transaction. Returns CBM_STORE_OK on success. */

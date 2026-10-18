@@ -170,6 +170,10 @@ typedef bool (*cbm_mcp_project_mutation_try_begin_fn)(void *context, const char 
 /* Create an MCP server. store_path is the SQLite database directory. */
 cbm_mcp_server_t *cbm_mcp_server_new(const char *store_path);
 
+/* Trusted embedding seam: exact query-only index; never cache discovery or
+ * fallback. Copies both strings. Must be set before dispatch. */
+bool cbm_mcp_server_bind_index(cbm_mcp_server_t *srv, const char *path, const char *project);
+
 /* Select the tool surface exposed by tools/list and enforced by dispatch. */
 void cbm_mcp_server_set_tool_profile(cbm_mcp_server_t *srv, cbm_mcp_tool_profile_t profile);
 

@@ -543,6 +543,7 @@ int cbm_http_parse_head(const char *data, size_t len, cbm_http_req_t *req, size_
     bool have_host = false;
     bool have_content_type = false;
     bool have_accept_language = false;
+    unsigned machine_headers = 0;
     const char *p = line_end + 2;
     const char *head_stop = data + head_end - 2; /* start of final CRLF */
     while (p < head_stop) {
@@ -556,7 +557,30 @@ int cbm_http_parse_head(const char *data, size_t len, cbm_http_req_t *req, size_
         if (nlen == 0)
             return 400;
 
-        if (header_name_is(p, nlen, "origin")) {
+        const char *machine_names[] = {"authorization",   "accept",   "mcp-protocol-version",
+                                       "idempotency-key", "if-match", "x-asms-signature"};
+        char *machine_values[] = {req->authorization,   req->accept,   req->mcp_protocol_version,
+                                  req->idempotency_key, req->if_match, req->asms_signature};
+        size_t machine_sizes[] = {
+            sizeof(req->authorization),   sizeof(req->accept),   sizeof(req->mcp_protocol_version),
+            sizeof(req->idempotency_key), sizeof(req->if_match), sizeof(req->asms_signature)};
+        bool machine_found = false;
+        for (unsigned hi = 0; hi < 6; hi++) {
+            if (header_name_is(p, nlen, machine_names[hi])) {
+                if (machine_headers & (1U << hi)) {
+                    return 400;
+                }
+                if (!copy_header_value(colon + 1, eol, machine_values[hi], machine_sizes[hi])) {
+                    return 431;
+                }
+                machine_headers |= 1U << hi;
+                machine_found = true;
+                break;
+            }
+        }
+        if (machine_found) {
+            /* Continue shared CRLF cursor advancement below. */
+        } else if (header_name_is(p, nlen, "origin")) {
             if (have_origin || !copy_header_value(colon + 1, eol, req->origin, sizeof(req->origin)))
                 return have_origin ? 400 : 431;
             have_origin = true;

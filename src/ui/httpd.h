@@ -60,6 +60,13 @@ typedef struct {
     char host[CBM_SZ_256];
     char content_type[CBM_SZ_128];
     char accept_language[CBM_SZ_256];
+    /* Additive machine-transport headers. Duplicates/oversize fail parsing. */
+    char authorization[CBM_SZ_1K];
+    char accept[CBM_SZ_256];
+    char mcp_protocol_version[CBM_SZ_128];
+    char idempotency_key[CBM_SZ_128];
+    char if_match[CBM_SZ_128];
+    char asms_signature[CBM_SZ_128];
     char *body;
     size_t body_len;
 } cbm_http_req_t;

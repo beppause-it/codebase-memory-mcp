@@ -1504,6 +1504,13 @@ const char *cbm_store_error(cbm_store_t *s) {
     return s ? s->errbuf : "null store";
 }
 
+cbm_store_diagnostic_t cbm_store_diagnostic(cbm_store_t *s) {
+    return (cbm_store_diagnostic_t){
+        .sqlite_code = sqlite3_extended_errcode(s ? s->db : NULL),
+        .sqlite_message = sqlite3_errmsg(s ? s->db : NULL),
+    };
+}
+
 /* ── Transaction ────────────────────────────────────────────────── */
 
 int cbm_store_begin(cbm_store_t *s) {

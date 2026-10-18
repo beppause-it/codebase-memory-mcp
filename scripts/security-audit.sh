@@ -54,7 +54,7 @@ while IFS= read -r file; do
             fi
         fi
     done
-done < <(find "$ROOT/src" -name '*.c' -type f | sort)
+done < <(find "$ROOT/src" "$ROOT/integrations/aup-sms/mcp-http/src" -name '*.c' -type f | sort)
 
 # ── 1b. Raw network calls (count-bounded explicit exceptions) ───
 #
@@ -158,7 +158,7 @@ while IFS= read -r file; do
             fi
         done < <(echo "$match" | grep -oE 'https?://[A-Za-z0-9._/~:@!$&()*+,;=?#%-]+' || true)
     done < <(grep -n 'https\?://' "$file" 2>/dev/null | grep -v '^\s*//' | grep -v '^\s*\*' || true)
-done < <(find "$ROOT/src" -name '*.c' -type f | sort)
+done < <(find "$ROOT/src" "$ROOT/integrations/aup-sms/mcp-http/src" -name '*.c' -type f | sort)
 
 if $URL_OK; then
     echo "OK: All URLs are on the allow-list."
@@ -195,7 +195,7 @@ while IFS= read -r file; do
             fi
             ;;
     esac
-done < <(find "$ROOT/src" -name '*.c' -type f | sort)
+done < <(find "$ROOT/src" "$ROOT/integrations/aup-sms/mcp-http/src" -name '*.c' -type f | sort)
 
 if ! $FOPEN_FOUND; then
     echo "OK: All file writes are in expected locations."
@@ -232,7 +232,7 @@ while IFS= read -r file; do
             TIMEBOMB_FOUND=true
         fi
     done
-done < <(find "$ROOT/src" -name '*.c' -type f | sort)
+done < <(find "$ROOT/src" "$ROOT/integrations/aup-sms/mcp-http/src" -name '*.c' -type f | sort)
 
 if ! $TIMEBOMB_FOUND; then
     echo "OK: No suspicious time-bomb patterns found."

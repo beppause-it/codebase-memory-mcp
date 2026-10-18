@@ -21,6 +21,13 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#if defined(CBM_ENABLE_TEST_SEAMS)
+static cbm_proc_created_test_hook_t cbm_created_test_hook;
+void cbm_subprocess_set_created_hook_for_testing(cbm_proc_created_test_hook_t hook) {
+    cbm_created_test_hook = hook;
+}
+#endif
+enum { CBM_WIN_SPAWN_ATTRIBUTE_COUNT = 2 };
 #include "win_utf8.h" /* cbm_utf8_to_wide — spawn the worker with a wide command line so a
                        * non-ASCII repo path survives CreateProcess (#423/#20) */
 #include <stdlib.h>   /* free */
@@ -1055,12 +1062,16 @@ static int cbm_subprocess_spawn_win(cbm_subprocess_t *process) {
         inherit[inherit_count++] = stdout_capture;
     }
     SIZE_T attrs_size = 0;
-    (void)InitializeProcThreadAttributeList(NULL, 1, 0, &attrs_size);
+    (void)InitializeProcThreadAttributeList(NULL, CBM_WIN_SPAWN_ATTRIBUTE_COUNT, 0, &attrs_size);
     attrs = (LPPROC_THREAD_ATTRIBUTE_LIST)malloc(attrs_size);
-    attrs_init = attrs && InitializeProcThreadAttributeList(attrs, 1, 0, &attrs_size);
-    bool attrs_ready = attrs_init && UpdateProcThreadAttribute(
-                                         attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit,
-                                         inherit_count * sizeof(inherit[0]), NULL, NULL);
+    attrs_init = attrs && InitializeProcThreadAttributeList(attrs, CBM_WIN_SPAWN_ATTRIBUTE_COUNT, 0,
+                                                            &attrs_size);
+    bool attrs_ready =
+        attrs_init &&
+        UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit,
+                                  inherit_count * sizeof(inherit[0]), NULL, NULL) &&
+        UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, &job, sizeof(job), NULL,
+                                  NULL);
     if (!attrs_ready) {
         goto fail;
     }
@@ -1102,16 +1113,16 @@ static int cbm_subprocess_spawn_win(cbm_subprocess_t *process) {
         return -1;
     }
 
-    /* Assignment while suspended closes the process-creation race: no worker
-     * instruction executes unless all descendants are already contained. */
-    if (!AssignProcessToJobObject(job, child.hProcess)) {
-        (void)TerminateProcess(child.hProcess, 1);
-        (void)WaitForSingleObject(child.hProcess, 5000);
-        CloseHandle(child.hThread);
-        CloseHandle(child.hProcess);
-        CloseHandle(job);
-        return -1;
+    /* JOB_LIST associates the kill-on-close Job during CreateProcess itself.
+     * Parent death before ResumeThread therefore cannot leave an uncontained
+     * suspended child. Unsupported attribute setup fails before creation. */
+#if defined(CBM_ENABLE_TEST_SEAMS)
+    if (cbm_created_test_hook) {
+        BOOL in_job = FALSE;
+        bool checked = IsProcessInJob(child.hProcess, job, &in_job) != 0;
+        cbm_created_test_hook(child.dwProcessId, checked && in_job);
     }
+#endif
     if (ResumeThread(child.hThread) == (DWORD)-1) {
         /* KILL_ON_JOB_CLOSE terminates the still-suspended contained process. */
         CloseHandle(job);

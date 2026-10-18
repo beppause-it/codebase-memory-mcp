@@ -242,4 +242,10 @@ cbm_fd_close_strategy_t cbm_subprocess_close_fds_from_for_testing(int lowfd, lon
 void cbm_subprocess_force_close_range_enosys_for_testing(bool force);
 #endif
 
+#if defined(CBM_ENABLE_TEST_SEAMS) && defined(_WIN32)
+/* Runs after atomic Job assignment and before the child's first instruction. */
+typedef void (*cbm_proc_created_test_hook_t)(unsigned long process_id, bool in_owned_job);
+void cbm_subprocess_set_created_hook_for_testing(cbm_proc_created_test_hook_t hook);
+#endif
+
 #endif /* CBM_SUBPROCESS_H */

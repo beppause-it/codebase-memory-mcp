@@ -32,6 +32,7 @@
 #include "daemon/project_lock.h"
 #include "daemon/version_cohort.h"
 #include "mcp/mcp.h"
+#include "../integrations/aup-sms/mcp-http/src/mcp_http.h"
 #include "mcp/index_supervisor.h"
 #include "mcp/test_impact_engine.h"
 #include "cli/cli.h"
@@ -2962,6 +2963,10 @@ int main(int argc, char **argv) {
         }
     }
 #endif
+    int asms_status = cbm_asms_mcp_http_entry(argc, argv);
+    if (asms_status >= 0) {
+        return asms_status;
+    }
     cbm_daemon_process_role_t role = cbm_daemon_process_role(argc, argv);
     if (role == CBM_DAEMON_PROCESS_WORKER) {
         /* Before this process writes ANYTHING. A worker's stderr is a file the

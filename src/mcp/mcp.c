@@ -1735,6 +1735,9 @@ static char *resolve_project_tail(char *project) {
  * "project_name" is the usual guess; "project_id" / "projectName" are accepted
  * too. NOT bare "name" — index_repository uses "name" for an explicit
  * project-name override. Caller must free() the result. */
+/* Embedding policy scoped to one dispatch/thread, including error helpers that
+ * otherwise enumerate the account cache. Default stdio keeps discovery. */
+static CBM_TLS bool fixed_index_dispatch;
 static char *get_project_arg(const char *args_json) {
     char *p = cbm_mcp_get_string_arg(args_json, "project");
     if (!p) {
@@ -1746,7 +1749,7 @@ static char *get_project_arg(const char *args_json) {
     if (!p) {
         p = cbm_mcp_get_string_arg(args_json, "projectName");
     }
-    return resolve_project_tail(normalize_project_arg(p));
+    return fixed_index_dispatch ? p : resolve_project_tail(normalize_project_arg(p));
 }
 
 int cbm_mcp_get_int_arg(const char *args_json, const char *key, int default_val) {
@@ -1835,6 +1838,8 @@ struct cbm_mcp_server {
 
     /* Session + auto-index state */
     char session_root[CBM_SZ_1K];     /* detected project root path */
+    char *fixed_index_path;
+    char *fixed_index_project;
     char session_project[CBM_SZ_256]; /* derived project name */
     bool session_detected;            /* true after first detection attempt */
     char *allowed_root;               /* explicit per-session boundary (heap, nullable) */
@@ -1915,6 +1920,32 @@ void cbm_mcp_server_set_tool_profile(cbm_mcp_server_t *srv, cbm_mcp_tool_profile
     if (srv) {
         srv->tool_profile = profile;
     }
+}
+
+bool cbm_mcp_server_bind_index(cbm_mcp_server_t *srv, const char *path, const char *project) {
+    if (!srv || !path || !path[0] || !project || !project[0]) {
+        return false;
+    }
+    char *p = heap_strdup(path);
+    char *n = heap_strdup(project);
+    if (!p || !n) {
+        free(p);
+        free(n);
+        return false;
+    }
+    free(srv->fixed_index_path);
+    free(srv->fixed_index_project);
+    srv->fixed_index_path = p;
+    srv->fixed_index_project = n;
+    srv->background_tasks = false;
+    srv->session_detected = true;
+    if (srv->owns_store && srv->store) {
+        cbm_store_close(srv->store);
+    }
+    srv->store = NULL;
+    free(srv->current_project);
+    srv->current_project = NULL;
+    return true;
 }
 
 cbm_store_t *cbm_mcp_server_store(cbm_mcp_server_t *srv) {
@@ -2085,6 +2116,8 @@ void cbm_mcp_server_free(cbm_mcp_server_t *srv) {
     free(srv->current_project);
     free(srv->allowed_root);
     free(srv->active_request_id_str);
+    free(srv->fixed_index_path);
+    free(srv->fixed_index_project);
     cbm_mutex_destroy(&srv->request_scope_mutex);
     free(srv);
 }
@@ -2480,6 +2513,16 @@ static cbm_store_t *resolve_store_internal(cbm_mcp_server_t *srv, const char *pr
                                            bool mutation_already_held, bool nonblocking_recovery,
                                            store_recovery_status_t *recovery_status,
                                            bool allow_autorecovery) {
+    if (srv->fixed_index_path) {
+        if (!project || strcmp(project, srv->fixed_index_project) != 0) {
+            return NULL;
+        }
+        if (!srv->store) {
+            srv->store = cbm_store_open_path_query(srv->fixed_index_path);
+            srv->owns_store = true;
+        }
+        return srv->store;
+    }
     if (recovery_status) {
         *recovery_status = STORE_RECOVERY_NONE;
     }
@@ -2752,6 +2795,15 @@ static void add_git_context_json(yyjson_mut_doc *doc, yyjson_mut_val *obj, const
 
 /* Build a helpful error listing available projects. Caller must free() result. */
 static char *build_project_list_error(const char *reason) {
+    if (fixed_index_dispatch) {
+        yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+        yyjson_mut_val *root = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_strcpy(doc, root, "error", reason);
+        yyjson_mut_doc_set_root(doc, root);
+        char *result = yyjson_mut_write(doc, 0, NULL);
+        yyjson_mut_doc_free(doc);
+        return result;
+    }
     char dir_path[CBM_SZ_1K];
     cache_dir(dir_path, sizeof(dir_path));
 
@@ -20619,7 +20671,10 @@ char *cbm_mcp_handle_tool(cbm_mcp_server_t *srv, const char *tool_name, const ch
     if (srv) {
         srv->read_batch_tool = mcp_tool_reads_in_batch(tool_name);
     }
+    bool previous_fixed_dispatch = fixed_index_dispatch;
+    fixed_index_dispatch = srv && srv->fixed_index_path;
     char *result = dispatch_tool(srv, tool_name, args_json);
+    fixed_index_dispatch = previous_fixed_dispatch;
     if (srv) {
         /* An embedded store outlives the request: end its batch here. */
         srv->read_batch_tool = false;

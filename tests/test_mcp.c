@@ -25257,7 +25257,23 @@ SUITE(mcp) {
 
 /* Kept separate so daemon-coordination regressions can be iterated without
  * running the much larger MCP behavior suite. */
+TEST(mcp_fixed_index_survives_session_context_rebind_and_free) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    ASSERT_TRUE(cbm_mcp_server_bind_index(srv, "nonexistent-cr27-a.db", "cr27-a"));
+    ASSERT_TRUE(cbm_mcp_server_set_session_context(srv, "/cr27-session", NULL));
+    ASSERT_TRUE(cbm_mcp_server_bind_index(srv, "nonexistent-cr27-b.db", "cr27-b"));
+    char *result = cbm_mcp_handle_tool(srv, "query_graph",
+                                       "{\"project\":\"cr27-b\",\"query\":\"MATCH (n) RETURN n\"}");
+    ASSERT_NOT_NULL(result);
+    ASSERT_NOT_NULL(strstr(result, "isError"));
+    free(result);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
 SUITE(mcp_mutation_guard) {
+    RUN_TEST(mcp_fixed_index_survives_session_context_rebind_and_free);
     RUN_TEST(tool_ingest_traces_mutation_guard_denial_prevents_writes);
     RUN_TEST(tool_ingest_traces_mutation_guard_balances_repeated_writes);
     RUN_TEST(tool_ingest_traces_mutation_guard_cancel_releases_without_writes);

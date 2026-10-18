@@ -87,6 +87,10 @@ void cbm_daemon_ipc_listener_close(cbm_daemon_ipc_listener_t *listener);
  * cache root as well as daemon-private artifacts. */
 bool cbm_daemon_ipc_private_directory_secure(const char *directory_path);
 
+/* Read an existing single-link regular owner-only file through the validated
+ * handle, beneath a private directory with trusted ancestry. Never creates it. */
+FILE *cbm_daemon_ipc_private_read_open(const char *directory_path, const char *base_name);
+
 /* Human-readable reason for this process's most recent private-namespace
  * validation refusal (empty string when none). Diagnostic only — callers
  * append it to their error messages; policy decisions never read it. */

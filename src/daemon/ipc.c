@@ -2148,6 +2148,27 @@ bool cbm_daemon_ipc_private_directory_secure(const char *directory_path) {
     return close(directory_fd) == 0;
 }
 
+FILE *cbm_daemon_ipc_private_read_open(const char *directory_path, const char *base_name) {
+    if (!private_log_base_name_valid(base_name)) {
+        return NULL;
+    }
+    int directory_fd = private_directory_tree_open(directory_path);
+    if (directory_fd < 0) {
+        return NULL;
+    }
+    int fd = openat(directory_fd, base_name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    bool safe = fd >= 0 && fd_set_cloexec(fd) &&
+                private_regular_file_snapshot(directory_fd, base_name, fd, 1, NULL);
+    if (close(directory_fd) != 0) {
+        safe = false;
+    }
+    FILE *stream = safe ? fdopen(fd, "rb") : NULL;
+    if (!stream && fd >= 0) {
+        (void)close(fd);
+    }
+    return stream;
+}
+
 static int private_log_file_open(int directory_fd, const char *base_name, struct stat *status_out) {
     int flags = O_WRONLY | O_APPEND | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK;
     int fd = openat(directory_fd, base_name, flags | O_CREAT | O_EXCL, 0600);
@@ -5406,6 +5427,44 @@ static bool private_log_base_name_valid(const char *base_name) {
         return false;
     }
     return strlen(base_name) <= 253;
+}
+
+FILE *cbm_daemon_ipc_private_read_open(const char *directory_path, const char *base_name) {
+    if (!private_log_base_name_valid(base_name) ||
+        !cbm_daemon_ipc_private_directory_secure(directory_path)) {
+        return NULL;
+    }
+    char *path = string_format("%s/%s", directory_path, base_name);
+    wchar_t *wide_path = path ? utf8_to_wide(path) : NULL;
+    free(path);
+    win_security_t security;
+    if (!wide_path || !win_security_init(&security)) {
+        free(wide_path);
+        return NULL;
+    }
+    HANDLE file =
+        CreateFileW(wide_path, GENERIC_READ | READ_CONTROL, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    free(wide_path);
+    BY_HANDLE_FILE_INFORMATION info;
+    bool safe =
+        file != INVALID_HANDLE_VALUE && GetFileType(file) == FILE_TYPE_DISK &&
+        GetFileInformationByHandle(file, &info) && info.nNumberOfLinks == 1 &&
+        !(info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) &&
+        win_file_security_secure(
+            &security, file, true,
+            FILE_ALL_ACCESS | GENERIC_ALL | GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE, false);
+    win_security_destroy(&security);
+    int fd = safe ? _open_osfhandle((intptr_t)file, _O_RDONLY | _O_BINARY | _O_NOINHERIT) : -1;
+    FILE *stream = fd >= 0 ? _fdopen(fd, "rb") : NULL;
+    if (!stream) {
+        if (fd >= 0) {
+            (void)_close(fd);
+        } else if (file != INVALID_HANDLE_VALUE) {
+            (void)CloseHandle(file);
+        }
+    }
+    return stream;
 }
 
 static HANDLE win_private_log_file_open(const wchar_t *path, DWORD creation_disposition,

@@ -24,6 +24,10 @@
  *   - find_first_descendant_by_kind (Verilog/SystemVerilog name wrappers)
  *   - find_first_descendant_of (Dart/Zig import URI/string nesting)
  *
+ * AUP-SMS JSON walkers (input traversal capped at 48 levels; redaction at 64,
+ * including nested serialized JSON; each recursive step increments depth):
+ *   - unique_json, public_copy
+ *
  * To add a function: add it below AND add NOLINT(misc-no-recursion) on
  * the function definition line. The lint gate verifies both match.
  */
@@ -32,4 +36,4 @@
         "eval_expr", "eval_expr_partial", "cypher_expr_selectivity", "glob_match",              \
         "glob_match_star", "glob_match_doublestar", "glob_match_doublestar_slash",              \
         "glob_match_doublestar_any", "parse_bool_expr", "parse_bool_atom", "r_collect_imports", \
-        "find_first_descendant_by_kind", "find_first_descendant_of"
+        "find_first_descendant_by_kind", "find_first_descendant_of", "unique_json", "public_copy"

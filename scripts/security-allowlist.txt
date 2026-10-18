@@ -85,3 +85,4 @@ URL:http://127.0.0.1:UI server binding (localhost only)
 URL:https://www.sqlite.org/c3ref/c_checkpoint_full.html:sqlite WAL checkpoint API doc reference (comment only, not a network call)
 URL:https://github.com/DeusData/codebase-memory-mcp:project repository self-reference in update/star notice (src/mcp/mcp.c)
 URL:https://%s:GitHub blob-URL construction in src/ui/http_server.c cbm_ui_git_web_base — https-forces the repo web base for frontend deep-links (not a network call)
+WRITE:integrations/aup-sms/mcp-http/src/mcp_http.c:1:exclusive random private worker input capture; removed after supervised process-tree teardown; no raw query or result enters audit
