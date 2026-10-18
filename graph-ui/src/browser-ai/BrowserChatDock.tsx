@@ -1,3 +1,4 @@
+import { type ChatScopeProvider, type ChatScopeRequest, type ChatScopeEvidence } from './chat-scope';
 import { useEffect, useMemo, useRef, useState, type FormEvent, type JSX, type ReactNode } from 'react';
 import type { BrowserAiProgress } from './browser-ai-controller';
 import { createBrowserChatRuntime, type BrowserChatRuntime } from './browser-ai-runtime';
@@ -27,6 +28,9 @@ import './browser-chat.css';
 
 export type { BrowserChatAttachment, BrowserChatContext, BrowserChatReaderContext, BrowserChatSource } from './chat-model';
 export interface BrowserChatDockProps {
+    chatScopeProvider?: ChatScopeProvider;
+    chatScopeRequest?: ChatScopeRequest;
+    onScopeReference?: (path: string, line: number) => void;
     proactiveSelection?: BrowserChatContext;
     selectionScope?: string;
     historyKey?: string;
@@ -55,7 +59,7 @@ export interface BrowserChatDockProps {
 }
 
 type Phase = 'off' | 'preparing' | 'ready' | 'counting' | 'generating' | 'removing';
-type ChatTurn = BrowserChatTurn & { evidence?: PreparedExplanationContext };
+type ChatTurn = BrowserChatTurn & { evidence?: PreparedExplanationContext; scopeEvidence?: ChatScopeEvidence };
 /** `grounded`: the facts are listed in the card, so the prompt's name budget is not the reader's limit. */
 type Explanation = { key: string; label: string; answer: string; status: string; error?: string; packet?: PreparedExplanationContext; citation?: ReturnType<typeof citedInterpretation>; mode?: 'interpretation'; shortened?: boolean; limit?: TokenLimits; evidence?: string; grounded?: boolean;
     /** The facts of a configuration or text file, which the model was not asked about (K12). */
@@ -192,7 +196,7 @@ function ContextSnapshot({ context }: { context: BrowserChatContext }): JSX.Elem
 }
 
 /** Keep mounted when collapsed: state and worker lifetime are independent of visibility. */
-export default function BrowserChatDock({ proactiveSelection, selectionScope = "", historyKey, proactive = true, onAgentStateChange, onAgentModelChange, settingsRequest = 0, open, onClose, showCollapsed = false, onOpen, attachment, readerContext, context = [], pendingContext, onContextConsumed, onContextRemoved, onAttachmentConsumed, onAttachmentRemoved, createRuntime = createBrowserChatRuntime, removeCache = removeBrowserModelCache, readSource, isCached = cachedInBrowser }: BrowserChatDockProps): JSX.Element {
+export default function BrowserChatDock({ chatScopeProvider, chatScopeRequest, onScopeReference, proactiveSelection, selectionScope = "", historyKey, proactive = true, onAgentStateChange, onAgentModelChange, settingsRequest = 0, open, onClose, showCollapsed = false, onOpen, attachment, readerContext, context = [], pendingContext, onContextConsumed, onContextRemoved, onAttachmentConsumed, onAttachmentRemoved, createRuntime = createBrowserChatRuntime, removeCache = removeBrowserModelCache, readSource, isCached = cachedInBrowser }: BrowserChatDockProps): JSX.Element {
     const { preferences, setPreferences } = useAgentPreferences();
     const automatic = preferences.automatic;
     const [explanation, setExplanation] = useState<Explanation>();
@@ -243,6 +247,8 @@ export default function BrowserChatDock({ proactiveSelection, selectionScope = "
     const manualAttachment = readerContext === undefined ? attachment : undefined;
     const currentReader = snapshotReaderContext(readerContext);
     const runtime = useRef<BrowserChatRuntime | undefined>(undefined);
+    const scopeAbort = useRef<AbortController | undefined>(undefined);
+    useEffect(() => () => scopeAbort.current?.abort(), [historyKey]);
     /** The model the worker was created for; the stored choice can change in another tab. */
     const runtimeModel = useRef<string | undefined>(undefined);
     /** The model still loading and its progress, so a project switch can hand it over unfinished (K24). */
@@ -605,6 +611,7 @@ export default function BrowserChatDock({ proactiveSelection, selectionScope = "
         }
     };
     const stop = (): void => {
+        scopeAbort.current?.abort();
         if (phase === 'preparing') { release(); setNotice('Download stopped. Cached files can be reused or deleted.'); return; }
         if (manualRequest.current && autoRun.current) {
             manualRequest.current.cancelled = true; manualRequest.current = undefined; setQuestionQueued(false);
@@ -637,7 +644,27 @@ export default function BrowserChatDock({ proactiveSelection, selectionScope = "
         const ask = retry !== undefined && ASKABLE.has(retry.answeredFrom ?? '');
         // The graph evidence it was listed from, read again with its source (K14).
         const askFrom = ask ? retry.listedFrom ?? retry.suggestion?.context : undefined;
-        const currentGraph = !retry && !reader && proactiveSelection ? [{ ...proactiveSelection }] : [];
+        let currentGraph = !retry && !reader && proactiveSelection ? [{ ...proactiveSelection }] : [];
+        const effectiveScope = chatScopeProvider && chatScopeRequest ? chatScopeProvider.scope(chatScopeRequest, { attachment: source, reader, graph: currentGraph[0], context: extra }).request : undefined;
+        let scopeEvidence = retry?.scopeEvidence;
+        if (!retry && chatScopeProvider && effectiveScope) {
+            const scopeEpoch = epoch.current;
+            const controller = new AbortController();
+            scopeAbort.current = controller;
+            const queued = { cancelled: false }; manualRequest.current = queued;
+            try {
+                scopeEvidence = await chatScopeProvider.resolve(effectiveScope!, controller.signal);
+                if (epoch.current !== scopeEpoch || queued.cancelled || runtime.current !== currentRuntime) return;
+                currentGraph = [];
+            } catch (failure) {
+                if (epoch.current === scopeEpoch) setError(chatScopeProvider.diagnostic(failure));
+                return;
+            } finally {
+                controller.abort();
+                if (scopeAbort.current === controller) scopeAbort.current = undefined;
+                if (manualRequest.current === queued) manualRequest.current = undefined;
+            }
+        }
         const packetGraph = askFrom ? [askFrom] : currentGraph;
         const consume = (): void => {
             setDraft(previous => previous === prompt ? '' : previous);
@@ -646,7 +673,7 @@ export default function BrowserChatDock({ proactiveSelection, selectionScope = "
             if (selectedGraph) { setHandledContextId(selectedGraph.id); onContextConsumed?.(selectedGraph.id); }
         };
         // A question without its own context may follow up on attached code in this view.
-        const topic = retry ? retry.topic : chatTopic(selectionScope, { reader, graph: currentGraph[0], attachment: source, context: extra })
+        const topic = retry ? retry.topic : scopeEvidence ? { kind: 'context' as const, key: scopeEvidence.key, label: scopeEvidence.label } : chatTopic(selectionScope, { reader, graph: currentGraph[0], attachment: source, context: extra })
             ?? followedTopic(turns, selectionScope);
         // Without code or graph facts the model can only guess: say what to select instead.
         if (!retry && !topic) {
@@ -731,7 +758,11 @@ export default function BrowserChatDock({ proactiveSelection, selectionScope = "
         // also from before the reader went elsewhere and came back (B4).
         const earlier = topicHistory(ask ? turns.filter(item => item.id !== retry.id) : turns, topic);
         let history: ChatTurn[] = earlier;
-        const makeRequest = () => buildChatMessages(history, prompt, source, extra, reader, currentGraph, packet ? formatExplanationEvidence(packet) : undefined, questionLanguage(prompt));
+        const makeRequest = () => {
+            const messages = buildChatMessages(history, prompt, source, extra, reader, currentGraph, scopeEvidence?.text ?? (packet ? formatExplanationEvidence(packet) : undefined), scopeEvidence ? undefined : questionLanguage(prompt));
+            if (scopeEvidence?.instruction) messages[0].content += `\n${scopeEvidence.instruction}`;
+            return messages;
+        };
         const queued = { cancelled: false }; manualRequest.current = queued;
         const waitingEpoch = epoch.current;
         // The selected symbol's source grounds a question as it grounds the explanation (K14).
@@ -801,7 +832,7 @@ export default function BrowserChatDock({ proactiveSelection, selectionScope = "
                 : earlier.filter(item => item.status !== 'error' && item.status !== 'generating' && !history.includes(item)).length;
             // A general question shows its facts at once; the model only adds a sentence.
             const writing = grounded ? writingExplanation(grounded.summary, groundedText[language].writingSentence, code) : '';
-            const turn: ChatTurn = { id, prompt, attachment: source, readerContext: reader, context: extra, evidence: packet, modelId: model.id, request, answer: writing, status: 'generating', topic,
+            const turn: ChatTurn = { id, prompt, scopeEvidence, attachment: source, readerContext: reader, context: extra, evidence: packet, modelId: model.id, request, answer: writing, status: 'generating', topic,
                 ...historyOmitted ? { historyOmitted } : {}, ...grounded ? { answeredFrom: 'grounded' as const, ...grounded.graph ? { listedFrom: grounded.graph } : {}, replyLanguage: language } : {},
                 ...ask || retry?.askedModel ? { askedModel: true } : {} };
             activeTurn.current = id;
@@ -811,10 +842,18 @@ export default function BrowserChatDock({ proactiveSelection, selectionScope = "
             let shortened = false;
             const onComplete = ({ stopReason }: { stopReason: string }) => { shortened = stopReason === 'length'; };
             const output = await currentRuntime.chat(request, chunk => {
-                if (grounded || epoch.current !== ticket || stopRequested.current) return;
+                if (grounded || scopeEvidence || epoch.current !== ticket || stopRequested.current) return;
                 setTurns(previous => previous.map(item => item.id === id ? { ...item, answer: item.answer + chunk } : item));
             }, grounded ? { maxOutputTokens: autoOutput, generationProfile: 'automatic-explanation', onComplete } : { maxOutputTokens: limits.outputTokens, onComplete });
             if (epoch.current !== ticket) return;
+            if (scopeEvidence && chatScopeProvider?.finalize && !stopRequested.current) {
+                if (shortened) setTurns(previous => previous.map(item => item.id === id ? { ...item, shortened: true,
+                    limit: { inputTokens: limits.inputTokens, outputTokens: limits.outputTokens } } : item));
+                const answer = chatScopeProvider.finalize(scopeEvidence, output);
+                setTurns(previous => previous.map(item => item.id === id ? { ...item, answer, status: 'complete',
+                    ...shortened ? { shortened, limit: { inputTokens: limits.inputTokens, outputTokens: limits.outputTokens } } : {} } : item));
+                return;
+            }
             if (grounded) {
                 // One sentence beside the facts, checked like the sentence of the explanation card.
                 const result = parseExplanationResponse(output, packet!);
@@ -836,8 +875,8 @@ export default function BrowserChatDock({ proactiveSelection, selectionScope = "
                 ...shortened && !stopRequested.current ? { shortened, limit: { inputTokens: limits.inputTokens, outputTokens: limits.outputTokens } } : {} } : item));
         } catch (failure) {
             if (epoch.current !== ticket) return;
-            if (isGpuRuntimeFailure(failure)) { invalidateRuntime(failure); return; }
-            const explanation = messageOf(failure);
+            if (isGpuRuntimeFailure(failure)) { invalidateRuntime(failure); if (scopeEvidence && chatScopeProvider) setError(chatScopeProvider.diagnostic(failure)); return; }
+            const explanation = scopeEvidence && chatScopeProvider ? chatScopeProvider.diagnostic(failure) : messageOf(failure);
             const id = activeTurn.current;
             if (id) setTurns(previous => previous.map(turn => turn.id === id ? { ...turn, status: stopRequested.current ? 'stopped' : 'error', error: stopRequested.current ? undefined : explanation,
                 ...grounded ? { answer: groundedExplanation(grounded.summary, undefined, false, grounded.from, language, code) } : {} } : turn));
@@ -968,7 +1007,11 @@ export default function BrowserChatDock({ proactiveSelection, selectionScope = "
                         </>}
                         {turn.context?.map(item => <ContextSnapshot key={item.id} context={item} />)}
                     </> : null}
-                </SourceDisclosure><div className="cbm-chat-answer-text"><ChatMarkdown text={turn.answer || (turn.status === 'generating' ? 'Thinking…' : turn.status === 'stopped' ? 'Stopped before an answer.' : '')} /></div>
+                </SourceDisclosure><div className="cbm-chat-answer-text">{turn.scopeEvidence && <aside aria-label="Effective scope">
+                    <strong>{turn.scopeEvidence.label}</strong>
+                    {turn.scopeEvidence.limitations.map((note, index) => <p key={index}>{note}</p>)}
+                    {turn.scopeEvidence.references.map(ref => <button type="button" key={JSON.stringify(ref)} onClick={() => onScopeReference?.(ref.path, ref.line)}>{ref.path}:{ref.line}</button>)}
+                </aside>}<ChatMarkdown text={turn.answer || (turn.status === 'generating' ? 'Thinking…' : turn.status === 'stopped' ? 'Stopped before an answer.' : '')} /></div>
                     {turn.status === 'stopped' && turn.answer && <small>Stopped · partial answer</small>}
                     {!turn.answeredFrom && !turn.echo && turn.answer && (turn.status === 'complete' || turn.status === 'stopped') && <small className="cbm-chat-model-note">{ownWords.modelNote}</small>}
                     {turn.status !== 'generating' && !turn.answeredFrom && !turn.echo && <AnswerNotes shortened={limitNote(turn.shortened, turn.limit)} packet={turn.evidence}
@@ -992,6 +1035,7 @@ export default function BrowserChatDock({ proactiveSelection, selectionScope = "
                 const checked = event.target.checked;
                 setSelectedContext(previous => checked ? [...previous.filter(selected => selected.id !== item.id), { ...item }] : previous.filter(selected => selected.id !== item.id));
             }} />{item.label}</label>)}</fieldset></details>}
+            {chatScopeProvider && chatScopeRequest && <small aria-label="Effective scope">{chatScopeProvider.scope(chatScopeRequest, { attachment: manualAttachment, reader: readerContext, context: selectedContext, graph: proactiveSelection }).label}</small>}
             {showConversation && <><label className="cbm-chat-visually-hidden" htmlFor="cbm-chat-prompt">Message local model</label>
             <div className="cbm-chat-input-row"><textarea ref={input} id="cbm-chat-prompt" value={draft} placeholder="Ask about this code…" rows={1} onChange={event => setDraft(event.target.value)} onKeyDown={event => {
                 if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); }

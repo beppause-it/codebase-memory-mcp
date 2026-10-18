@@ -1,3 +1,4 @@
+import type { ChatScopeProvider } from './browser-ai/chat-scope';
 /**
  * Die Verdrahtung: Projekt aus der Adresszeile, Baum aus dem Graphen, Datei in
  * den Reader.
@@ -753,13 +754,13 @@ interface WindowCarry {
  * den Arbeitsbereich und die Grenzen des Walks, nichts vom alten Projekt (A5).
  */
 const PAGE_PARAMS = ['workspace', CLOSURE_DEPTH_PARAM, CLOSURE_CAP_PARAM] as const;
-export default function App(): JSX.Element {
+export default function App({ chatScopeProvider }: { chatScopeProvider?: ChatScopeProvider } = {}): JSX.Element {
     return <ProjectWindows<WindowCarry> around={switchKeepingAgent} keepParams={PAGE_PARAMS}>
-        {shown => <ProjectWindowView key={shown.key} projectWindow={shown} />}
+        {shown => <ProjectWindowView key={shown.key} projectWindow={shown} chatScopeProvider={chatScopeProvider} />}
     </ProjectWindows>;
 }
 
-function ProjectWindowView({ projectWindow }: { projectWindow: ProjectWindow<WindowCarry> }): JSX.Element {
+function ProjectWindowView({ projectWindow, chatScopeProvider }: { projectWindow: ProjectWindow<WindowCarry>; chatScopeProvider?: ChatScopeProvider }): JSX.Element {
     const carried = projectWindow.carried;
     const [workspace, setWorkspace] = useState<Workspace>(() => {
         try {
@@ -1401,6 +1402,9 @@ function ProjectWindowView({ projectWindow }: { projectWindow: ProjectWindow<Win
     const [overviewError, setOverviewError] = useState<string | undefined>();
     const [overviewRevision, setOverviewRevision] = useState(0);
     const repositoryReading = useRepositorySnapshot(project, overviewRevision);
+    useEffect(() => {
+        if (chatScopeProvider) { setProactiveSelection(undefined); setChatGraphSelection(undefined); setChatAttachment(undefined); }
+    }, [chatScopeProvider, project, repositoryReading.snapshot?.generation]);
     const [entryQuery, setEntryQuery] = useState('');
     const [entryHits, setEntryHits] = useState<RankedHit[]>(noHits);
     const [entryStatus, setEntryStatus] = useState<EntrySearchStatus>('idle');
@@ -4812,8 +4816,14 @@ function ProjectWindowView({ projectWindow }: { projectWindow: ProjectWindow<Win
             onOpenSystem={() => changeWorkspace('system')}
             daemonState={serverOk === undefined ? 'checking' : serverOk ? 'connected' : 'disconnected'}
             chatOpen={browserAiOpen}
-            chatDock={<BrowserChatDock open={browserAiOpen} onClose={() => setBrowserAiOpen(false)}
-                historyKey={project ? browserChatHistoryProjectKey(window.location.origin, project) : undefined}
+            chatDock={<BrowserChatDock
+                key={chatScopeProvider ? JSON.stringify([project, repositoryReading.snapshot?.generation]) : undefined}
+                chatScopeProvider={chatScopeProvider}
+                onScopeReference={(path, line) => navigateEvidence(path, line)}
+                chatScopeRequest={chatScopeProvider ? { project, generation: repositoryReading.snapshot?.generation,
+                    selection: workspace === 'galaxy' && activeGalaxySelection ? { kind: activeGalaxySelection.label, path: activeGalaxySelection.file_path ?? activeGalaxySelection.name } : undefined } : undefined}
+                open={browserAiOpen} onClose={() => setBrowserAiOpen(false)}
+                historyKey={project ? browserChatHistoryProjectKey(window.location.origin, chatScopeProvider ? JSON.stringify([project, repositoryReading.snapshot?.generation]) : project) : undefined}
                 proactiveSelection={proactiveSelection?.scope === selectionScope ? proactiveSelection.context : undefined}
                 selectionScope={selectionScope} onAgentStateChange={onAgentStateChange} onAgentModelChange={setAgentModelName} settingsRequest={agentSettingsRequest}
                 readerContext={workspace === 'explore' ? currentReaderContext : undefined}

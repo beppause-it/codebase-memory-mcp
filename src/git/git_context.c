@@ -111,6 +111,49 @@ static int git_capture(const char *repo_path, const char *git_args, char **out) 
     return *out ? 0 : CBM_NOT_FOUND;
 }
 
+/* Re-run only a failed git command with stderr merged into stdout. Successful
+ * commands keep separated streams, so warnings cannot corrupt a valid value.
+ * The returned text is Git's original first diagnostic line. */
+static void git_failure_diagnostic(const char *repo_path, const char *git_args,
+                                   cbm_git_context_t *context) {
+    if (!repo_path || !git_args || !git_validate_repo_path(repo_path)) {
+        context->diagnostic_message = git_strdup("git repository path validation failed");
+        return;
+    }
+    char cmd[GIT_CMD_MAX];
+    int n = snprintf(cmd, sizeof(cmd), "git -C \"%s\" %s 2>&1", repo_path, git_args);
+    if (n < 0 || n >= (int)sizeof(cmd)) {
+        context->diagnostic_message =
+            git_strdup("git diagnostic command exceeded the supported length");
+        return;
+    }
+    context->diagnostic_command = git_strdup(cmd);
+    context->diagnostic_replay = true;
+    FILE *fp = cbm_popen_git(cmd);
+    if (!fp) {
+        context->diagnostic_message = git_strdup("git diagnostic process could not be started");
+        return;
+    }
+    char output[GIT_OUTPUT_MAX] = {0};
+    size_t read = fread(output, 1, sizeof(output) - 1, fp);
+    output[read] = '\0';
+    context->diagnostic_truncated = read == sizeof(output) - 1 && !feof(fp);
+    trim_newlines(output);
+    int rc = cbm_pclose(fp);
+    context->diagnostic_exit_code = rc;
+    if (read > 0 && output[0]) {
+        cbm_log_warn("git.capture_failed", "args", git_args, "path", repo_path,
+                     "diagnostic", output);
+        context->diagnostic_message = git_strdup(output);
+        return;
+    }
+    char fallback[128];
+    snprintf(fallback, sizeof(fallback), "git command failed with exit code %d", rc);
+    cbm_log_warn("git.capture_failed", "args", git_args, "path", repo_path,
+                 "diagnostic", fallback);
+    context->diagnostic_message = git_strdup(fallback);
+}
+
 static bool path_is_absolute(const char *path) {
     if (!path || !path[0]) {
         return false;
@@ -261,6 +304,8 @@ void cbm_git_context_free(cbm_git_context_t *ctx) {
     free(ctx->branch_slug);
     free(ctx->head_sha);
     free(ctx->base_sha);
+    free(ctx->diagnostic_message);
+    free(ctx->diagnostic_command);
     memset(ctx, 0, sizeof(*ctx));
 }
 
@@ -286,6 +331,7 @@ int cbm_git_context_resolve(const char *path, cbm_git_context_t *out) {
 
     if (git_capture(path, "rev-parse --show-toplevel", &out->worktree_root) != 0) {
         out->is_git = false;
+        git_failure_diagnostic(path, "rev-parse --show-toplevel", out);
         return 0;
     }
     out->is_git = true;
@@ -447,7 +493,9 @@ int cbm_git_context_props_json(const cbm_git_context_t *ctx, char *buf, int buf_
         json_append_string(buf, buf_size, &off, "git_common_dir", ctx->git_common_dir, true) &&
         json_append_string(buf, buf_size, &off, "branch", ctx->branch, true) &&
         json_append_string(buf, buf_size, &off, "head_sha", ctx->head_sha, true) &&
-        json_append_string(buf, buf_size, &off, "base_sha", ctx->base_sha, false) &&
+        json_append_string(buf, buf_size, &off, "base_sha", ctx->base_sha, true) &&
+        json_append_string(buf, buf_size, &off, "diagnostic_message", ctx->diagnostic_message,
+                           false) &&
         append_fmt_checked(buf, buf_size, &off, "}");
     if (!ok) {
         if (buf_size > 0) {

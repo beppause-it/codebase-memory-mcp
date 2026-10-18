@@ -2734,6 +2734,17 @@ static void add_git_context_json(yyjson_mut_doc *doc, yyjson_mut_val *obj, const
     add_git_context_string(doc, git, "branch_slug", ctx.branch_slug);
     add_git_context_string(doc, git, "head_sha", ctx.head_sha);
     add_git_context_string(doc, git, "base_sha", ctx.base_sha);
+    if (ctx.diagnostic_message) {
+        yyjson_mut_val *diagnostic = yyjson_mut_obj(doc);
+        add_git_context_string(doc, diagnostic, "message", ctx.diagnostic_message);
+        add_git_context_string(doc, diagnostic, "command", ctx.diagnostic_command);
+        yyjson_mut_obj_add_int(doc, diagnostic, "exit_code", ctx.diagnostic_exit_code);
+        yyjson_mut_obj_add_bool(doc, diagnostic, "replay", ctx.diagnostic_replay);
+        yyjson_mut_obj_add_bool(doc, diagnostic, "truncated", ctx.diagnostic_truncated);
+        yyjson_mut_obj_add_val(doc, git, "diagnostic", diagnostic);
+    } else {
+        yyjson_mut_obj_add_null(doc, git, "diagnostic");
+    }
     yyjson_mut_obj_add_val(doc, obj, "git", git);
 
     cbm_git_context_free(&ctx);

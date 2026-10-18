@@ -137,6 +137,9 @@ if [[ -n "$VERSION" ]]; then
     CLEAN_VERSION="${VERSION#v}"
     CFLAGS_EXTRA="-DCBM_VERSION=\"\\\"$CLEAN_VERSION\\\"\""
 fi
+if [[ -n "${EXTRA_CFLAGS:-}" ]]; then
+    CFLAGS_EXTRA="${CFLAGS_EXTRA:+$CFLAGS_EXTRA }$EXTRA_CFLAGS"
+fi
 
 print_env "build.sh"
 echo "  ui=$WITH_UI version=${VERSION:-dev}"

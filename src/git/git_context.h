@@ -18,6 +18,11 @@ typedef struct {
     char *branch_slug;
     char *head_sha;
     char *base_sha;
+    char *diagnostic_message;
+    char *diagnostic_command;
+    int diagnostic_exit_code;
+    bool diagnostic_replay;
+    bool diagnostic_truncated;
 } cbm_git_context_t;
 
 int cbm_git_context_resolve(const char *path, cbm_git_context_t *out);

@@ -1,0 +1,11 @@
+{
+  "name": "@aup-sms/lens-repository-scope-chat",
+  "version": "0.1.0-cr24",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node ../../../../graph-ui/node_modules/vitest/vitest.mjs run --config vite.config.ts",
+    "test:browser": "node --test tests/browser.test.mjs",
+    "build": "node ../../../../graph-ui/node_modules/typescript/bin/tsc -p tsconfig.json && node ../../../../graph-ui/node_modules/vite/bin/vite.js build --config vite.config.ts"
+  }
+}

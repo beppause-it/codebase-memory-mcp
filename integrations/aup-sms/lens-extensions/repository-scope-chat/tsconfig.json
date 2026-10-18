@@ -1,0 +1,14 @@
+{
+  "extends": "../../../../graph-ui/tsconfig.json",
+  "compilerOptions": {
+    "types": [], "noUnusedLocals": true,
+    "paths": {
+      "react": ["../../../../graph-ui/node_modules/@types/react"],
+      "react/*": ["../../../../graph-ui/node_modules/@types/react/*"],
+      "react-dom/*": ["../../../../graph-ui/node_modules/@types/react-dom/*"],
+      "vite/client": ["../../../../graph-ui/node_modules/vite/client.d.ts"]
+    }
+  },
+  "include": ["src", "../../../../graph-ui/src/**/*.d.ts"],
+  "exclude": ["tests"]
+}

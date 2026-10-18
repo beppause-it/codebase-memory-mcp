@@ -2423,7 +2423,8 @@ static bool main_daemon_ctl_wait_for_ui(int port, const main_daemon_ctl_ui_readi
 }
 
 static int main_daemon_ctl_finish_ui_open(cbm_daemon_runtime_client_t **client_io, int port,
-                                          bool open_browser);
+                                          bool wait_ready, bool open_browser,
+                                          uint32_t timeout_ms, bool json_output);
 
 static void main_daemon_ctl_print_ui_configuration(void) {
     if (!(CBM_EMBEDDED_FILE_COUNT > 0)) {
@@ -2496,9 +2497,12 @@ static bool main_daemon_ctl_apply_ui_config(cbm_daemon_runtime_client_t *client,
 }
 
 static int main_daemon_ctl_finish_ui_open(cbm_daemon_runtime_client_t **client_io, int port,
-                                          bool open_browser) {
-    if (!open_browser) {
-        printf("  ui: warming asynchronously on configured port %d\n", port);
+                                          bool wait_ready, bool open_browser,
+                                          uint32_t timeout_ms, bool json_output) {
+    if (!wait_ready) {
+        if (!json_output) {
+            printf("  ui: warming asynchronously on configured port %d\n", port);
+        }
         return EXIT_SUCCESS;
     }
     main_daemon_ctl_ui_readiness_t readiness = {0};
@@ -2506,7 +2510,7 @@ static int main_daemon_ctl_finish_ui_open(cbm_daemon_runtime_client_t **client_i
     if (!main_daemon_ctl_ui_readiness_prepare(client, &readiness)) {
         (void)fprintf(stderr,
                       "error: the active daemon generation could not provide an authenticated "
-                      "UI readiness proof; browser was not opened\n");
+                      "UI readiness proof\n");
         return EXIT_FAILURE;
     }
     /* The generation-bound proof is self-contained.  Do not retain the
@@ -2519,7 +2523,9 @@ static int main_daemon_ctl_finish_ui_open(cbm_daemon_runtime_client_t **client_i
         *client_io = NULL;
         (void)cbm_daemon_runtime_client_close(owned_client, MAIN_CLOSE_TIMEOUT_MS);
     }
-    uint32_t timeout_ms = main_daemon_ctl_ui_ready_timeout_ms();
+    if (timeout_ms == 0) {
+        timeout_ms = main_daemon_ctl_ui_ready_timeout_ms();
+    }
     bool ready = main_daemon_ctl_wait_for_ui(port, &readiness, timeout_ms);
     cbm_secure_zero(&readiness, sizeof(readiness));
     if (!ready) {
@@ -2533,9 +2539,57 @@ static int main_daemon_ctl_finish_ui_open(cbm_daemon_runtime_client_t **client_i
                       port);
         return EXIT_FAILURE;
     }
-    printf("  ui: http://127.0.0.1:%d\n", port);
-    main_daemon_ctl_open_browser(port);
+    if (!json_output) {
+        printf("  ui: http://127.0.0.1:%d\n", port);
+    }
+    if (open_browser) {
+        main_daemon_ctl_open_browser(port);
+    }
     return EXIT_SUCCESS;
+}
+
+static void main_daemon_ctl_print_pid_array_json(const uint32_t *pids, uint8_t count) {
+    putchar('[');
+    for (uint8_t index = 0; index < count; index++) {
+        printf("%s%lu", index == 0 ? "" : ",", (unsigned long)pids[index]);
+    }
+    putchar(']');
+}
+
+static bool main_daemon_ctl_build_conflict(const cbm_daemon_runtime_status_t *status,
+                                           const cbm_daemon_build_identity_t *identity) {
+    return status && identity && status->build_fingerprint[0] != '\0' &&
+           strcmp(status->build_fingerprint, identity->build_fingerprint) != 0;
+}
+
+static void main_daemon_ctl_print_status_json(const cbm_daemon_runtime_status_t *status,
+                                              bool build_conflict) {
+    cbm_ui_config_t ui_config;
+    cbm_ui_config_load(&ui_config);
+    printf("{\"status\":\"%s\",\"permanent\":%s,\"pid\":%lu,"
+           "\"semantic_version\":\"%s\",\"build_fingerprint\":\"%s\","
+           "\"committed_clients\":%u,\"client_pids\":",
+           build_conflict ? "build_conflict" : "active",
+           status->permanent ? "true" : "false", (unsigned long)status->daemon_pid,
+           status->semantic_version, status->build_fingerprint,
+           (unsigned)status->committed_clients);
+    main_daemon_ctl_print_pid_array_json(status->client_pids, status->client_count);
+    printf(",\"stopping\":%s,\"ui\":{\"enabled\":%s,\"port\":%d}}\n",
+           status->stopping ? "true" : "false",
+           ui_config.ui_enabled ? "true" : "false", ui_config.ui_port);
+}
+
+static void main_daemon_ctl_print_stop_json(const char *status, bool accepted, uint32_t pid,
+                                            uint16_t committed_clients, const uint32_t *pids,
+                                            uint8_t count) {
+    printf("{\"status\":\"%s\",\"accepted\":%s,", status,
+           accepted ? "true" : "false");
+    if (pid != 0) {
+        printf("\"pid\":%lu,", (unsigned long)pid);
+    }
+    printf("\"committed_clients\":%u,\"client_pids\":", (unsigned)committed_clients);
+    main_daemon_ctl_print_pid_array_json(pids, count);
+    printf("}\n");
 }
 
 static int main_run_daemon_ctl(int argc, char **argv, const cbm_daemon_ipc_endpoint_t *endpoint,
@@ -2543,7 +2597,10 @@ static int main_run_daemon_ctl(int argc, char **argv, const cbm_daemon_ipc_endpo
                                const char *executable_path) {
     const char *subcommand = NULL;
     bool open_browser = false;
+    bool wait_ready = false;
+    bool json_output = false;
     int requested_port = 0;
+    uint32_t requested_timeout_ms = 0;
     bool arguments_valid = true;
     for (int index = 1; index < argc; index++) {
         if (strcmp(argv[index], "daemon") == 0) {
@@ -2554,6 +2611,21 @@ static int main_run_daemon_ctl(int argc, char **argv, const cbm_daemon_ipc_endpo
             subcommand = argv[index];
         } else if (strcmp(argv[index], "--open") == 0) {
             open_browser = true;
+            wait_ready = true;
+        } else if (strcmp(argv[index], "--wait-ready") == 0) {
+            wait_ready = true;
+        } else if (strcmp(argv[index], "--json") == 0) {
+            json_output = true;
+        } else if (strncmp(argv[index], "--timeout-ms=", 13) == 0) {
+            char *end = NULL;
+            errno = 0;
+            unsigned long parsed = strtoul(argv[index] + 13, &end, 10);
+            if (errno != 0 || !end || *end != '\0' || parsed < 50UL || parsed > 600000UL) {
+                (void)fprintf(stderr,
+                              "error: --timeout-ms requires a value between 50 and 600000\n");
+                return 2;
+            }
+            requested_timeout_ms = (uint32_t)parsed;
         } else if (strncmp(argv[index], "--port=", 7) == 0) {
             requested_port = atoi(argv[index] + 7);
             if (requested_port <= 0 || requested_port >= MAIN_MAX_PORT) {
@@ -2568,8 +2640,9 @@ static int main_run_daemon_ctl(int argc, char **argv, const cbm_daemon_ipc_endpo
     }
     if (!arguments_valid || !subcommand) {
         (void)fprintf(stderr, "usage: codebase-memory-mcp daemon <start|stop|status> "
-                              "[--open] [--port=N]\n");
-        return EXIT_FAILURE;
+                              "[--open|--wait-ready] [--port=N] [--timeout-ms=N] "
+                              "[--json]\n");
+        return 2;
     }
 
     cbm_daemon_runtime_status_t status;
@@ -2579,6 +2652,11 @@ static int main_run_daemon_ctl(int argc, char **argv, const cbm_daemon_ipc_endpo
     if (strcmp(subcommand, "status") == 0) {
         if (!active) {
             if (status.muted_endpoint_holder_pid != 0) {
+                if (json_output) {
+                    printf("{\"status\":\"not_responding\",\"pid\":%llu}\n",
+                           (unsigned long long)status.muted_endpoint_holder_pid);
+                    return 4;
+                }
                 /* Alive process, dead runtime (2026-08-29 zombie class).
                  * "not running" here sent the operator hunting through
                  * processes, pipes, and logs by hand; name the holder and the
@@ -2591,10 +2669,19 @@ static int main_run_daemon_ctl(int argc, char **argv, const cbm_daemon_ipc_endpo
                        (unsigned long long)status.muted_endpoint_holder_pid);
                 return EXIT_FAILURE;
             }
+            if (json_output) {
+                printf("{\"status\":\"not_running\"}\n");
+                return 3;
+            }
             printf("daemon: not running\n");
             printf("hint: `codebase-memory-mcp daemon start` keeps a daemon warm so CLI "
                    "commands and hooks skip the per-command startup cost.\n");
             return EXIT_FAILURE;
+        }
+        bool build_conflict = main_daemon_ctl_build_conflict(&status, identity);
+        if (json_output) {
+            main_daemon_ctl_print_status_json(&status, build_conflict);
+            return build_conflict ? 5 : 0;
         }
         printf("daemon: active (%s)\n", status.permanent ? "permanent" : "session-managed");
         printf("  pid: %lu\n", (unsigned long)status.daemon_pid);
@@ -2610,12 +2697,33 @@ static int main_run_daemon_ctl(int argc, char **argv, const cbm_daemon_ipc_endpo
 
     if (strcmp(subcommand, "stop") == 0) {
         if (!active) {
+            if (json_output) {
+                const char *state = status.muted_endpoint_holder_pid == 0 ? "not_running"
+                                                                         : "not_responding";
+                main_daemon_ctl_print_stop_json(
+                    state, false, (uint32_t)status.muted_endpoint_holder_pid, 0, NULL, 0);
+                return status.muted_endpoint_holder_pid == 0 ? 0 : 4;
+            }
             printf("daemon: not running (nothing to stop)\n");
             return EXIT_SUCCESS;
+        }
+        if (main_daemon_ctl_build_conflict(&status, identity)) {
+            if (json_output) {
+                main_daemon_ctl_print_stop_json("build_conflict", false, status.daemon_pid,
+                                                status.committed_clients, status.client_pids,
+                                                status.client_count);
+            }
+            return 5;
         }
         cbm_daemon_runtime_stop_result_t stop_result;
         if (!cbm_daemon_runtime_request_stop(endpoint, identity, MAIN_DAEMON_CTL_STOP_TIMEOUT_MS,
                                              &stop_result)) {
+            if (json_output) {
+                main_daemon_ctl_print_stop_json("not_responding", false, status.daemon_pid,
+                                                status.committed_clients, status.client_pids,
+                                                status.client_count);
+                return 4;
+            }
             (void)fprintf(stderr,
                           "error: the active daemon did not answer the stop request; "
                           "if it is stuck, terminate pid %lu directly\n",
@@ -2623,6 +2731,13 @@ static int main_run_daemon_ctl(int argc, char **argv, const cbm_daemon_ipc_endpo
             return EXIT_FAILURE;
         }
         if (stop_result.busy) {
+            if (json_output) {
+                main_daemon_ctl_print_stop_json("busy", false, status.daemon_pid,
+                                                stop_result.committed_clients,
+                                                stop_result.client_pids,
+                                                stop_result.client_count);
+                return 6;
+            }
             printf("daemon: NOT stopped — %u committed client(s) still use it.\n",
                    (unsigned)stop_result.committed_clients);
             main_daemon_ctl_print_clients(stop_result.client_pids, stop_result.client_count,
@@ -2631,8 +2746,16 @@ static int main_run_daemon_ctl(int argc, char **argv, const cbm_daemon_ipc_endpo
             return EXIT_FAILURE;
         }
         if (!stop_result.accepted) {
+            if (json_output) {
+                main_daemon_ctl_print_stop_json("stopping", false, status.daemon_pid, 0, NULL, 0);
+                return 0;
+            }
             printf("daemon: already stopping\n");
             return EXIT_SUCCESS;
+        }
+        if (json_output) {
+            main_daemon_ctl_print_stop_json("stopping", true, status.daemon_pid, 0, NULL, 0);
+            return 0;
         }
         printf("daemon: stopping (pid %lu)\n", (unsigned long)status.daemon_pid);
         return EXIT_SUCCESS;
@@ -2640,6 +2763,15 @@ static int main_run_daemon_ctl(int argc, char **argv, const cbm_daemon_ipc_endpo
 
     /* start */
     if (active) {
+        if (main_daemon_ctl_build_conflict(&status, identity)) {
+            if (json_output) {
+                printf("{\"status\":\"build_conflict\",\"pid\":%lu,"
+                       "\"build_fingerprint\":\"%s\",\"ui_port\":0,"
+                       "\"ui_ready\":false}\n",
+                       (unsigned long)status.daemon_pid, status.build_fingerprint);
+            }
+            return 5;
+        }
         if (status.permanent) {
             printf("daemon: already active (permanent, pid %lu)\n",
                    (unsigned long)status.daemon_pid);
@@ -2649,11 +2781,11 @@ static int main_run_daemon_ctl(int argc, char **argv, const cbm_daemon_ipc_endpo
                    (unsigned long)status.daemon_pid);
         }
         if (!(CBM_EMBEDDED_FILE_COUNT > 0)) {
-            if (requested_port > 0 || open_browser) {
+            if (requested_port > 0 || wait_ready) {
                 (void)fprintf(stderr, "warning: this binary was built without UI support; "
                                       "--port/--open have no effect\n");
             }
-            return EXIT_SUCCESS;
+            return wait_ready ? EXIT_FAILURE : EXIT_SUCCESS;
         }
         cbm_ui_config_t ui_config;
         cbm_ui_config_load(&ui_config);
@@ -2670,7 +2802,7 @@ static int main_run_daemon_ctl(int argc, char **argv, const cbm_daemon_ipc_endpo
         }
         cbm_daemon_runtime_client_t *ui_client = NULL;
         cbm_daemon_runtime_connect_result_t connect_result;
-        if (open_browser) {
+        if (wait_ready) {
             ui_client = cbm_daemon_runtime_client_connect(endpoint, identity,
                                                           MAIN_CONNECT_TIMEOUT_MS, &connect_result);
             if (!ui_client) {
@@ -2680,7 +2812,16 @@ static int main_run_daemon_ctl(int argc, char **argv, const cbm_daemon_ipc_endpo
                 return EXIT_FAILURE;
             }
         }
-        int ui_result = main_daemon_ctl_finish_ui_open(&ui_client, ui_config.ui_port, open_browser);
+        int ui_result = main_daemon_ctl_finish_ui_open(&ui_client, ui_config.ui_port, wait_ready,
+                                                       open_browser, requested_timeout_ms,
+                                                       json_output);
+        if (json_output && ui_result == EXIT_SUCCESS) {
+            printf("{\"status\":\"ready\",\"pid\":%lu,"
+                   "\"build_fingerprint\":\"%s\",\"ui_port\":%d,"
+                   "\"ui_ready\":%s}\n",
+                   (unsigned long)status.daemon_pid, status.build_fingerprint,
+                   ui_config.ui_port, wait_ready ? "true" : "false");
+        }
         if (ui_client) {
             (void)cbm_daemon_runtime_client_close(ui_client, MAIN_CLOSE_TIMEOUT_MS);
         }
@@ -2700,6 +2841,14 @@ static int main_run_daemon_ctl(int argc, char **argv, const cbm_daemon_ipc_endpo
     cbm_daemon_bootstrap_status_t start_status =
         main_client_bootstrap_with_upgrade(&start_config, &start_result, true);
     if (start_status != CBM_DAEMON_BOOTSTRAP_CONNECTED || !start_result.client) {
+        if (json_output) {
+            const bool conflict = start_status == CBM_DAEMON_BOOTSTRAP_CONFLICT;
+            printf("{\"status\":\"%s\",\"pid\":0,"
+                   "\"build_fingerprint\":\"%s\",\"ui_port\":%d,"
+                   "\"ui_ready\":false}\n",
+                   conflict ? "build_conflict" : "failed", identity->build_fingerprint,
+                   requested_port);
+        }
         (void)fprintf(stderr, "error: %s\n",
                       start_result.message[0] ? start_result.message
                                               : "the permanent daemon could not be started");
@@ -2707,7 +2856,7 @@ static int main_run_daemon_ctl(int argc, char **argv, const cbm_daemon_ipc_endpo
             (void)fprintf(stderr, "hint: a daemon of a different build is active; "
                                   "`codebase-memory-mcp daemon stop` retires it.\n");
         }
-        return EXIT_FAILURE;
+        return start_status == CBM_DAEMON_BOOTSTRAP_CONFLICT ? 5 : EXIT_FAILURE;
     }
 
     /* The committed control connection satisfied the daemon's no-client
@@ -2743,7 +2892,7 @@ static int main_run_daemon_ctl(int argc, char **argv, const cbm_daemon_ipc_endpo
              * was in fact running and healthy. It also made a loaded machine look
              * like a broken one, because a second of scheduling delay after an
              * abrupt shutdown is enough to miss this handshake. */
-            if (requested_port > 0 || open_browser) {
+            if (requested_port > 0 || wait_ready) {
                 (void)fprintf(stderr,
                               "error: the daemon did not accept the UI configuration; browser was "
                               "not opened\n");
@@ -2754,7 +2903,7 @@ static int main_run_daemon_ctl(int argc, char **argv, const cbm_daemon_ipc_endpo
                           "warning: the daemon started but did not accept the UI configuration; "
                           "the UI is unavailable until the next `daemon start`\n");
         }
-    } else if (requested_port > 0 || open_browser) {
+    } else if (requested_port > 0 || wait_ready) {
         (void)fprintf(stderr, "warning: this binary was built without UI support; "
                               "--port/--open have no effect\n");
     }
@@ -2762,19 +2911,30 @@ static int main_run_daemon_ctl(int argc, char **argv, const cbm_daemon_ipc_endpo
     cbm_daemon_runtime_status_t started;
     bool started_ok = cbm_daemon_runtime_request_status(endpoint, identity,
                                                         MAIN_DAEMON_CTL_PROBE_TIMEOUT_MS, &started);
-    if (started_ok) {
+    if (started_ok && !json_output) {
         printf("daemon: started (permanent, pid %lu)\n", (unsigned long)started.daemon_pid);
-    } else {
+    } else if (!json_output) {
         printf("daemon: started (permanent)\n");
     }
-    printf("It survives idle periods and session ends; `codebase-memory-mcp daemon stop` "
-           "retires it.\n");
+    if (!json_output) {
+        printf("It survives idle periods and session ends; `codebase-memory-mcp daemon stop` "
+               "retires it.\n");
+    }
     /* Skipped when the handshake was refused: that path announces the port as
      * warming, which would be a promise nothing is keeping. */
     int ui_result =
         (CBM_EMBEDDED_FILE_COUNT > 0 && ui_configured)
-            ? main_daemon_ctl_finish_ui_open(&start_result.client, ui_port, open_browser)
+            ? main_daemon_ctl_finish_ui_open(&start_result.client, ui_port, wait_ready,
+                                             open_browser, requested_timeout_ms, json_output)
             : EXIT_SUCCESS;
+    if (json_output && ui_result == EXIT_SUCCESS) {
+        printf("{\"status\":\"ready\",\"pid\":%lu,"
+               "\"build_fingerprint\":\"%s\",\"ui_port\":%d,"
+               "\"ui_ready\":%s}\n",
+               started_ok ? (unsigned long)started.daemon_pid : 0UL,
+               started_ok ? started.build_fingerprint : identity->build_fingerprint, ui_port,
+               wait_ready ? "true" : "false");
+    }
     if (start_result.client) {
         (void)cbm_daemon_runtime_client_close(start_result.client, MAIN_CLOSE_TIMEOUT_MS);
     }

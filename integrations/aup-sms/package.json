@@ -1,0 +1,11 @@
+{
+  "name": "@beppause-it/cbm-lens-embed",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "types": "./cbm-lens-embed.d.ts",
+  "exports": "./cbm-lens-embed.js",
+  "scripts": {
+    "test": "node --test cbm-lens-embed.test.js"
+  }
+}
