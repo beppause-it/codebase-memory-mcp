@@ -403,6 +403,114 @@ class Transport(unittest.TestCase):
             response = self.s.mutate("source-a", self.s.attestation(self.one, **change))
             self.assertEqual(response[0], 409, response)
 
+    def artifact_with_projects(self, names=(), generation=None, symbol="shadow-test"):
+        path = self.work / (secrets.token_hex(6) + ".db")
+        index = fixture(path, symbol)
+        with sqlite3.connect(path) as db:
+            for name in names:
+                db.execute("INSERT INTO projects VALUES(?,?,?)", (name, "2026-10-22", "/private/root"))
+        index["artifact_sha256"] = sha(path.read_bytes())
+        if generation is not None:
+            index["generation"] = generation
+        self.s.config["indexes"] = [index]
+        self.s.write_config()
+        return index
+
+    def assert_identity_failure(self, response, stage):
+        self.assertEqual(response[0], 409, response)
+        self.assertEqual(response[1]["contract"], "asms-cbm-http/v1", response)
+        self.assertEqual(response[1]["type"], "error", response)
+        self.assertEqual(response[1]["code"], "ATTESTATION_UNVERIFIABLE", response)
+        self.assertEqual(response[1]["message"],
+                         "READY attestation, validity or exact local artifact verification failed", response)
+        cause = response[1]["causes"][0]["result"]["structuredContent"]
+        self.assertEqual(cause["code"], "ARTIFACT_IDENTITY_OR_INTEGRITY_FAILED", response)
+        self.assertEqual(cause["verification_stage"], stage, response)
+        self.assertIn("message", cause, response)
+        self.assertIn("errno", cause, response)
+        self.assertIn("os_message", cause, response)
+        diagnostic = json.dumps(response[1])
+        for field in ["ARTIFACT_IDENTITY_OR_INTEGRITY_FAILED", "sqlite_code", "sqlite_message",
+                      "verification_stage", stage]:
+            self.assertIn(field, diagnostic, response)
+        self.assertTrue(response[1]["request_id"], response)
+        self.assertTrue(response[1]["correlation_id"], response)
+        self.assertTrue(response[1]["causes"], response)
+        self.assertEqual(response[2]["X-Request-Id"], response[1]["request_id"], response)
+
+    def test_exact_coverage_shadow_attests_and_tools_stay_project_scoped(self):
+        index = self.artifact_with_projects(["private-native::missed"])
+        path = Path(index["path"])
+        with sqlite3.connect(path) as db:
+            db.execute("INSERT INTO nodes VALUES(2,?,?,?,?,?,?,?,?)",
+                       ("private-native::missed", "Function", "shadow-only", "shadow-only", "missed.c", 1, 1, "{}"))
+        index["artifact_sha256"] = sha(path.read_bytes())
+        self.s.config["indexes"] = [index]; self.s.write_config()
+        self.activate(index=index)
+        result = self.call()[1]
+        self.assertNotIn("error", result, result)
+        self.assertIn("shadow-test", json.dumps(result))
+        self.assertNotIn("shadow-only", json.dumps(result))
+        self.assertEqual(index["artifact_sha256"], sha(path.read_bytes()))
+
+    def test_unrelated_projects_and_shadows_are_rejected(self):
+        for names in [["another-project"], ["another-project::missed"],
+                      ["private-native::other"], ["private-native::missed::missed"],
+                      ["private-native::missed", "another-project"]]:
+            with self.subTest(projects=names):
+                index = self.artifact_with_projects(names)
+                self.assert_identity_failure(self.s.mutate("source-a", self.s.attestation(index)),
+                                             "project_identity")
+
+    def test_two_sources_with_coverage_shadows_remain_independent(self):
+        first = self.artifact_with_projects(["private-native::missed"], symbol="first-only")
+        second = self.artifact_with_projects(["private-native::missed"], symbol="second-only")
+        first["repository_index_id"] = "19"
+        second["repository_index_id"] = "20"
+        self.s.config["indexes"] = [first, second]; self.s.write_config()
+        self.activate("7", first)
+        self.activate("8", second)
+        for source, yes, no in [("7", "first-only", "second-only"), ("8", "second-only", "first-only")]:
+            result = self.call(source)[1]
+            self.assertNotIn("error", result, result)
+            self.assertIn(yes, json.dumps(result))
+            self.assertNotIn(no, json.dumps(result))
+        self.assertEqual(self.s.mutate("7", revision=1, method="DELETE")[0], 200)
+        self.assertEqual(self.call("7")[1]["error"]["data"]["code"], "SOURCE_NOT_ACTIVE")
+        self.assertNotIn("error", self.call("8")[1])
+
+    def test_shadow_cannot_replace_the_requested_primary(self):
+        index = self.artifact_with_projects(["private-native::missed"])
+        with sqlite3.connect(index["path"]) as db:
+            db.execute("DELETE FROM projects WHERE name='private-native'")
+        index["artifact_sha256"] = sha(Path(index["path"]).read_bytes())
+        self.s.config["indexes"] = [index]; self.s.write_config()
+        self.assert_identity_failure(self.s.mutate("source-a", self.s.attestation(index)),
+                                     "project_identity")
+
+    def test_shadow_still_requires_native_generation_not_lens_generation(self):
+        for generation in ["u0123456789abcdefg2", "f" * 64]:
+            with self.subTest(generation=generation):
+                index = self.artifact_with_projects(["private-native::missed"], generation)
+                self.assert_identity_failure(self.s.mutate("source-a", self.s.attestation(index)),
+                                             "native_generation")
+
+    def test_shadow_still_requires_exact_artifact_checksum(self):
+        index = self.artifact_with_projects(["private-native::missed"])
+        index["artifact_sha256"] = "0" * 64
+        self.s.config["indexes"] = [index]; self.s.write_config()
+        response = self.s.mutate("source-a", self.s.attestation(index))
+        self.assertEqual(response[0], 409, response)
+        self.assertIn("ARTIFACT_CHECKSUM_MISMATCH", json.dumps(response[1]))
+
+    def test_shadow_still_requires_native_integrity(self):
+        index = self.artifact_with_projects(["private-native::missed"])
+        with sqlite3.connect(index["path"]) as db:
+            db.execute("UPDATE projects SET root_path='?invalid-root'")
+        index["artifact_sha256"] = sha(Path(index["path"]).read_bytes())
+        self.s.config["indexes"] = [index]; self.s.write_config()
+        self.assert_identity_failure(self.s.mutate("source-a", self.s.attestation(index)), "integrity")
+
     def test_corrupt_artifact_original_sqlite_cause(self):
         path = self.work / (secrets.token_hex(6) + ".db")
         path.write_bytes(b"not a SQLite database" * 100)

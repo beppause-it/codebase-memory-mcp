@@ -102,7 +102,11 @@ rejected. Health requires the control bearer.
 
 1. Export a sealed immutable CBM artifact without WAL/journal sidecars. Register
    its opaque index ID, exact native project/generation and SHA-256 in trusted
-   operator config. Multi-project artifact files are refused.
+   operator config. A file may contain that exact native project and its derived
+   `<cbm_project>::missed` coverage shadow. Other projects/shadows are refused.
+   `generation` is the native `cbm_store_generation` identity, not ASMS
+   `lens_generation`; retain the Lens identity separately. The same native value
+   must be supplied in trusted config and the signed attestation.
 2. ASMS owns READY and the active index. Send the complete signed PUT attestation
    from CONTRACT.md using the project control bearer, Idempotency-Key and If-Match.
    The signature covers exact UTF-8 request bytes, not reserialized JSON. No ASMS

@@ -630,6 +630,26 @@ static char *verification_diagnostic(const char *code, const char *message, int 
     yyjson_mut_doc_free(d);
     return out;
 }
+/* A coverage graph belongs to its exact native project, not another source. */
+static bool artifact_projects_match(const cbm_project_t *projects, int count, const char *project) {
+    if (count < SKIP_ONE || count > CBM_SZ_2) {
+        return false;
+    }
+    char shadow[CBM_SZ_256];
+    cbm_store_coverage_shadow_project(shadow, sizeof(shadow), project);
+    int primary = 0;
+    for (int i = 0; i < count; i++) {
+        if (!projects[i].name) {
+            return false;
+        }
+        if (!strcmp(projects[i].name, project)) {
+            primary++;
+        } else if (strcmp(projects[i].name, shadow)) {
+            return false;
+        }
+    }
+    return primary == SKIP_ONE;
+}
 static bool verify_index(yyjson_val *index, char **diagnostic) {
     const char *path = str(index, "path");
     const char *project = str(index, "cbm_project");
@@ -689,11 +709,19 @@ static bool verify_index(yyjson_val *index, char **diagnostic) {
     cbm_project_t p = {0};
     cbm_project_t *projects = NULL;
     int count = 0;
+    const char *stage = "project_identity";
     bool ok = cbm_store_list_projects(store, &projects, &count) == CBM_STORE_OK &&
-              count == SKIP_ONE && cbm_store_get_project(store, project, &p) == CBM_STORE_OK &&
-              cbm_store_generation(store, generation, sizeof(generation)) == CBM_STORE_OK &&
-              strcmp(generation, str(index, "generation")) == 0 &&
-              cbm_store_check_integrity_verdict(store) == CBM_INTEGRITY_OK;
+              artifact_projects_match(projects, count, project) &&
+              cbm_store_get_project(store, project, &p) == CBM_STORE_OK;
+    if (ok) {
+        stage = "native_generation";
+        ok = cbm_store_generation(store, generation, sizeof(generation)) == CBM_STORE_OK &&
+             strcmp(generation, str(index, "generation")) == 0;
+    }
+    if (ok) {
+        stage = "integrity";
+        ok = cbm_store_check_integrity_verdict(store) == CBM_INTEGRITY_OK;
+    }
     cbm_store_free_projects(projects, count);
     if (!ok) {
         const char *original = cbm_store_error(store);
@@ -707,6 +735,7 @@ static bool verify_index(yyjson_val *index, char **diagnostic) {
         if (original_doc) {
             yyjson_mut_doc *md = yyjson_doc_mut_copy(original_doc, NULL);
             yyjson_mut_val *root = yyjson_mut_doc_get_root(md);
+            yyjson_mut_obj_add_strcpy(md, root, "verification_stage", stage);
             yyjson_mut_obj_add_int(md, root, "sqlite_code", sql.sqlite_code);
             yyjson_mut_obj_add_strcpy(md, root, "sqlite_message", sql.sqlite_message);
             free(*diagnostic);

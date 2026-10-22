@@ -22,6 +22,14 @@ Each index: `repository_index_id`, `cbm_project`, `generation`, `artifact_sha256
 `path`. Paths are trusted operator configuration, never MCP inputs. Artifacts
 are immutable sealed CBM SQLite files without WAL/journal sidecars. Each call
 verifies hash, native project and native generation in its isolated worker.
+The artifact must contain the configured native project exactly once and may
+also contain its exact `<cbm_project>::missed` coverage shadow. A shadow alone,
+an unrelated shadow or a second real project is rejected. Shadow data is not
+included in project-scoped tool queries.
+`generation` is the opaque native identity returned by `cbm_store_generation`
+(`u<db_uid>g<mutation_gen>` for current artifacts); ASMS `lens_generation` is a
+different identity and must not be substituted or overwritten. Both config and
+attestation must carry the same native identity. There is no permissive fallback.
 `request_max_bytes` default 65536 (max 1MiB), `response_max_bytes` default 1MiB,
 `timeout_ms` default 30000 (max 120000), `max_depth` default 8 (max 32),
 `max_results` default 100 (max 1000), `audit_retention_seconds` default 604800,
@@ -84,6 +92,10 @@ Transactions serialize concurrent CAS. No automatic rollback/reactivation.
 Control success/failure envelope: contract=asms-cbm-http/v1, type, code, message,
 details, request_id, correlation_id, causes array. Source mutation returns only
 source_id, revision and state in details; ETag is the decimal revision.
+Artifact identity/integrity failures retain their existing code, message, OS and
+SQLite diagnostics in `causes`. An additive `verification_stage` identifies
+`project_identity`, `native_generation` or `integrity`; it does not replace the
+original diagnostic or request/correlation identifiers.
 Health machine-readable details contain process state and source revision/state,
 never token, locator or checksum. States INSTALLING, VERIFYING, ACTIVE, DEGRADED,
 FAILED, REVOKED, EXPIRED; effective state revalidated, no implicit graph fallback.

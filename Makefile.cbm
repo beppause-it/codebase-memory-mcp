@@ -1369,12 +1369,8 @@ embed: frontend
 	scripts/embed-frontend.sh graph-ui/dist $(BUILD_DIR)/embedded
 
 cbm-with-ui: embed $(OBJS_VENDORED_PROD)
-	$(CC) $(CFLAGS_PROD) -o $(BUILD_DIR)/codebase-memory-mcp \
-		$(MAIN_SRC) $(PROD_SRCS_WITH_ASSETS) \
-		$(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC) \
-		$(OBJS_VENDORED_PROD) \
-		$(wildcard $(BUILD_DIR)/embedded/embed_*.o) \
-		$(LDFLAGS)
+	$(file >$(BUILD_DIR)/prod-ui-inputs.rsp,$(MAIN_SRC) $(PROD_SRCS_WITH_ASSETS) $(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC) $(OBJS_VENDORED_PROD) $(wildcard $(BUILD_DIR)/embedded/embed_*.o))
+	$(CC) $(CFLAGS_PROD) -o $(BUILD_DIR)/codebase-memory-mcp @$(BUILD_DIR)/prod-ui-inputs.rsp $(LDFLAGS)
 	@echo "Built with UI: $(BUILD_DIR)/codebase-memory-mcp"
 
 clean-c: export BUILD_DIR := $(BUILD_DIR)
