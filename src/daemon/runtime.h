@@ -279,8 +279,10 @@ typedef struct {
 } cbm_daemon_runtime_status_t;
 
 typedef struct {
-    bool accepted; /* stopping was initiated */
-    bool busy;     /* refused: committed clients hold the daemon */
+    bool accepted;                      /* stopping was initiated */
+    bool busy;                          /* refused: committed clients hold the daemon */
+    const char *control_error;          /* local failure, never transmitted as a wire field */
+    cbm_daemon_runtime_status_t target; /* kernel-checked target of this stop request */
     uint16_t committed_clients;
     uint8_t client_count;
     uint32_t client_pids[CBM_DAEMON_CONTROL_CLIENT_CAP];
@@ -295,7 +297,9 @@ bool cbm_daemon_runtime_request_status(const cbm_daemon_ipc_endpoint_t *endpoint
 
 /* One-shot authenticated stop request. Refuses while committed clients exist
  * (result_out lists their pids); otherwise begins the stopping sequence, for
- * permanent generations too. */
+ * permanent generations too, across builds. Probes the target first and binds
+ * the stop connection to that kernel peer PID and mapped executable fingerprint.
+ * Does not admit an application client or bypass the refuse-if-busy policy. */
 bool cbm_daemon_runtime_request_stop(const cbm_daemon_ipc_endpoint_t *endpoint,
                                      const cbm_daemon_build_identity_t *identity,
                                      uint32_t timeout_ms,

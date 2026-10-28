@@ -188,10 +188,73 @@ class Transport(unittest.TestCase):
                                 env=env, capture_output=True, text=True, timeout=30, cwd=ROOT)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_effective_schema_tracks_profile_reload_and_bounds(self):
+        required = {
+            "query_graph": {"query": "MATCH (n) RETURN n LIMIT 1"},
+            "trace_path": {"function_name": "main"},
+            "get_file_outline": {"file_path": "src/example.c"},
+        }
+        for results, depth in [(100, 8), (7, 2), (1, 1), (300, 20)]:
+            self.s.config.update(max_results=results, max_depth=depth, response_max_bytes=32768)
+            self.s.write_config()
+            response = self.s.rpc("tools/list")
+            self.assertEqual(response[0], 200, response)
+            tools = response[1]["result"]["tools"]
+            self.assertEqual(len(tools), 6)
+            for tool in tools:
+                name, schema = tool["name"], tool["inputSchema"]
+                args = dict(source_id="7", **required.get(name, {}))
+                bounded = {k: v for k, v in schema["properties"].items()
+                           if k in {"limit", "max_rows", "semantic_limit", "depth", "max_output_tokens"}}
+                for key, spec in bounded.items():
+                    ceiling = depth if key == "depth" else 8192 if key == "max_output_tokens" else results
+                    self.assertLessEqual(spec["maximum"], ceiling, (name, key, spec))
+                    self.assertLessEqual(spec["minimum"], spec["default"])
+                    self.assertLessEqual(spec["default"], spec["maximum"])
+                    for value in {spec["minimum"], spec["default"], spec["maximum"]}:
+                        reply = self.s.rpc("tools/call", dict(name=name, arguments={**args, key: value}))
+                        self.assertEqual(reply[1]["error"]["data"]["code"], "SOURCE_NOT_ACTIVE", (name, key, value, reply))
+                    for value, reason in [(spec["minimum"] - 1, "minimum"), (spec["maximum"] + 1, "maximum")]:
+                        reply = self.s.rpc("tools/call", dict(name=name, arguments={**args, key: value}))
+                        error = reply[1]["error"]["data"]
+                        self.assertEqual(error["code"], "TOOL_ARGUMENTS_REJECTED")
+                        self.assertEqual(error["details"]["parameter"], key)
+                        self.assertEqual(error["details"]["reason"], reason)
+                        self.assertEqual(error["details"]["maximum"], spec["maximum"])
+                        self.assertEqual(error["details"]["path"], "/arguments/" + key)
+                        self.assertEqual(error["diagnostic"]["primary"]["code"], "TOOL_ARGUMENTS_REJECTED")
+                reply = self.s.rpc("tools/call", dict(name=name, arguments=args))
+                self.assertEqual(reply[1]["error"]["data"]["code"], "SOURCE_NOT_ACTIVE")
+
+    def test_effective_defaults_execute_on_active_artifact(self):
+        self.s.config.update(max_results=1, max_depth=1, response_max_bytes=32768)
+        self.s.write_config()
+        self.activate()
+        tool = next(t for t in self.s.rpc("tools/list")[1]["result"]["tools"] if t["name"] == "query_graph")
+        default = tool["inputSchema"]["properties"]["max_rows"]["default"]
+        self.assertEqual(default, 1)
+        for args in [{}, {"max_rows": default}]:
+            reply = self.call(**args)
+            self.assertEqual(reply[0], 200, reply)
+            self.assertFalse(reply[1]["result"].get("isError", False), reply)
+            self.assertIn("alpha-only", json.dumps(reply[1]))
+
+    def test_argument_diagnostics_do_not_echo_caller_content(self):
+        secret = "private-query-sentinel"
+        for args in [{"source_id": 7}, {"source_id": "7", "diagnostics": None},
+                     {"source_id": "7", secret: secret}]:
+            reply = self.s.rpc("tools/call", dict(name="get_graph_schema", arguments=args))
+            error = reply[1]["error"]["data"]
+            self.assertEqual(error["code"], "TOOL_ARGUMENTS_REJECTED")
+            self.assertIn(error["details"]["reason"], {"type", "additional_property_not_allowed"})
+            self.assertNotIn(secret, json.dumps(reply[1]))
+
     def test_stdio_catalog_unchanged(self):
         cache = self.s.root / "stdio-cache"
         cache.mkdir(mode=0o700)
-        env = dict(os.environ, CBM_CACHE_DIR=str(cache))
+        runtime = self.s.root / "stdio-runtime"
+        runtime.mkdir(mode=0o700)
+        env = dict(os.environ, CBM_CACHE_DIR=str(cache), CBM_RUNTIME_DIR=str(runtime))
         messages = [dict(jsonrpc="2.0", id=1, method="initialize", params=dict(protocolVersion=PROTO, capabilities={}, clientInfo=dict(name="stdio-regression", version="1"))),
                     dict(jsonrpc="2.0", id=2, method="tools/list")]
         try:
@@ -203,6 +266,9 @@ class Transport(unittest.TestCase):
             self.assertGreater(len(catalog), 6)
             self.assertIn("index_repository", {t["name"] for t in catalog})
             self.assertIn("project", next(t for t in catalog if t["name"] == "query_graph")["inputSchema"]["properties"])
+            props = next(t for t in catalog if t["name"] == "query_graph")["inputSchema"]["properties"]
+            self.assertEqual(props["max_rows"]["minimum"], 0)
+            self.assertEqual(props["max_rows"]["default"], 200)
         finally:
             subprocess.run([BINARY, "daemon", "stop"], env=env, capture_output=True, timeout=30)
 

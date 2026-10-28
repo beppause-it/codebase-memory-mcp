@@ -2922,7 +2922,9 @@ static bool runtime_control_request_send(const cbm_daemon_ipc_endpoint_t *endpoi
                                          const cbm_daemon_build_identity_t *identity,
                                          cbm_daemon_runtime_operation_t operation,
                                          uint32_t timeout_ms, uint32_t response_size,
-                                         uint8_t **payload_out, uint64_t *muted_holder_pid_out) {
+                                         uint8_t **payload_out, uint64_t *muted_holder_pid_out,
+                                         const cbm_daemon_runtime_status_t *expected,
+                                         const char **control_error) {
     *payload_out = NULL;
     if (muted_holder_pid_out) {
         *muted_holder_pid_out = 0;
@@ -2938,6 +2940,18 @@ static bool runtime_control_request_send(const cbm_daemon_ipc_endpoint_t *endpoi
         return false;
     }
     cbm_daemon_ipc_connection_t *connection = cbm_daemon_ipc_connect(endpoint, timeout_ms);
+    if (expected) {
+        char fingerprint[CBM_DAEMON_BUILD_FINGERPRINT_SIZE];
+        uint64_t peer = connection ? cbm_daemon_ipc_connection_peer_pid(connection) : 0;
+        if (!peer || peer != expected->daemon_pid ||
+            !cbm_daemon_runtime_process_build_fingerprint(peer, fingerprint) ||
+            strcmp(fingerprint, expected->build_fingerprint) != 0) {
+            if (control_error)
+                *control_error = "daemon_identity_changed_or_unverifiable";
+            cbm_daemon_ipc_connection_close(connection);
+            return false;
+        }
+    }
     bool sent =
         connection && cbm_daemon_ipc_send_frame(connection, CBM_DAEMON_FRAME_REQUEST, operation,
                                                 request, (uint32_t)sizeof(request));
@@ -2958,8 +2972,14 @@ static bool runtime_control_request_send(const cbm_daemon_ipc_endpoint_t *endpoi
     bool valid = received == 1 && frame.type == CBM_DAEMON_FRAME_RESPONSE &&
                  frame.flags == operation && frame.length == response_size && payload &&
                  payload[0] == 1U;
+    if (!valid && connection && muted_holder_pid_out) {
+        /* An answering but incompatible/rejecting endpoint is not absent. */
+        *muted_holder_pid_out = cbm_daemon_ipc_connection_peer_pid(connection);
+    }
     cbm_daemon_ipc_connection_close(connection);
     if (!valid) {
+        if (control_error)
+            *control_error = "control_response_invalid_or_unavailable";
         free(payload);
         return false;
     }
@@ -2983,7 +3003,7 @@ bool cbm_daemon_runtime_request_status(const cbm_daemon_ipc_endpoint_t *endpoint
     uint8_t *payload = NULL;
     if (!runtime_control_request_send(endpoint, identity, CBM_DAEMON_RUNTIME_OP_STATUS, timeout_ms,
                                       CBM_DAEMON_STATUS_RESPONSE_SIZE, &payload,
-                                      &status_out->muted_endpoint_holder_pid)) {
+                                      &status_out->muted_endpoint_holder_pid, NULL, NULL)) {
         return false;
     }
     status_out->permanent = (payload[1] & 0x01U) != 0U;
@@ -3079,9 +3099,16 @@ bool cbm_daemon_runtime_request_stop(const cbm_daemon_ipc_endpoint_t *endpoint,
         return false;
     }
     memset(result_out, 0, sizeof(*result_out));
+    cbm_daemon_runtime_status_t target;
+    if (!cbm_daemon_runtime_request_status(endpoint, identity, timeout_ms, &target)) {
+        result_out->control_error = "control_status_unavailable";
+        return false;
+    }
+    result_out->target = target;
     uint8_t *payload = NULL;
     if (!runtime_control_request_send(endpoint, identity, CBM_DAEMON_RUNTIME_OP_STOP, timeout_ms,
-                                      CBM_DAEMON_STOP_RESPONSE_SIZE, &payload, NULL)) {
+                                      CBM_DAEMON_STOP_RESPONSE_SIZE, &payload, NULL, &target,
+                                      &result_out->control_error)) {
         return false;
     }
     result_out->accepted = (payload[1] & 0x01U) != 0U;

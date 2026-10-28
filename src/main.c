@@ -2582,15 +2582,19 @@ static void main_daemon_ctl_print_status_json(const cbm_daemon_runtime_status_t 
 
 static void main_daemon_ctl_print_stop_json(const char *status, bool accepted, uint32_t pid,
                                             uint16_t committed_clients, const uint32_t *pids,
-                                            uint8_t count) {
-    printf("{\"status\":\"%s\",\"accepted\":%s,", status,
-           accepted ? "true" : "false");
+                                            uint8_t count,
+                                            const cbm_daemon_runtime_status_t *observed,
+                                            const cbm_daemon_build_identity_t *requested) {
+    printf("{\"status\":\"%s\",\"accepted\":%s,", status, accepted ? "true" : "false");
     if (pid != 0) {
         printf("\"pid\":%lu,", (unsigned long)pid);
     }
     printf("\"committed_clients\":%u,\"client_pids\":", (unsigned)committed_clients);
     main_daemon_ctl_print_pid_array_json(pids, count);
-    printf("}\n");
+    printf(",\"active_version\":\"%s\",\"active_build\":\"%s\","
+           "\"requested_version\":\"%s\",\"requested_build\":\"%s\"}\n",
+           observed->semantic_version, observed->build_fingerprint, requested->semantic_version,
+           requested->build_fingerprint);
 }
 
 static int main_run_daemon_ctl(int argc, char **argv, const cbm_daemon_ipc_endpoint_t *endpoint,
@@ -2699,44 +2703,44 @@ static int main_run_daemon_ctl(int argc, char **argv, const cbm_daemon_ipc_endpo
     if (strcmp(subcommand, "stop") == 0) {
         if (!active) {
             if (json_output) {
-                const char *state = status.muted_endpoint_holder_pid == 0 ? "not_running"
-                                                                         : "not_responding";
-                main_daemon_ctl_print_stop_json(
-                    state, false, (uint32_t)status.muted_endpoint_holder_pid, 0, NULL, 0);
+                const char *state =
+                    status.muted_endpoint_holder_pid == 0 ? "not_running" : "not_responding";
+                main_daemon_ctl_print_stop_json(state, false,
+                                                (uint32_t)status.muted_endpoint_holder_pid, 0, NULL,
+                                                0, &status, identity);
                 return status.muted_endpoint_holder_pid == 0 ? 0 : 4;
+            }
+            if (status.muted_endpoint_holder_pid != 0) {
+                (void)fprintf(stderr,
+                              "error: daemon control unavailable or incompatible "
+                              "(endpoint held by pid %llu)\n",
+                              (unsigned long long)status.muted_endpoint_holder_pid);
+                return 4;
             }
             printf("daemon: not running (nothing to stop)\n");
             return EXIT_SUCCESS;
         }
-        if (main_daemon_ctl_build_conflict(&status, identity)) {
-            if (json_output) {
-                main_daemon_ctl_print_stop_json("build_conflict", false, status.daemon_pid,
-                                                status.committed_clients, status.client_pids,
-                                                status.client_count);
-            }
-            return 5;
-        }
         cbm_daemon_runtime_stop_result_t stop_result;
         if (!cbm_daemon_runtime_request_stop(endpoint, identity, MAIN_DAEMON_CTL_STOP_TIMEOUT_MS,
                                              &stop_result)) {
+            (void)fprintf(stderr, "error: daemon stop: %s (observed pid %lu)\n",
+                          stop_result.control_error ? stop_result.control_error : "control_failed",
+                          (unsigned long)status.daemon_pid);
             if (json_output) {
-                main_daemon_ctl_print_stop_json("not_responding", false, status.daemon_pid,
-                                                status.committed_clients, status.client_pids,
-                                                status.client_count);
+                main_daemon_ctl_print_stop_json(
+                    stop_result.control_error ? stop_result.control_error : "not_responding", false,
+                    status.daemon_pid, status.committed_clients, status.client_pids,
+                    status.client_count, &status, identity);
                 return 4;
             }
-            (void)fprintf(stderr,
-                          "error: the active daemon did not answer the stop request; "
-                          "if it is stuck, terminate pid %lu directly\n",
-                          (unsigned long)status.daemon_pid);
             return EXIT_FAILURE;
         }
+        status = stop_result.target;
         if (stop_result.busy) {
             if (json_output) {
-                main_daemon_ctl_print_stop_json("busy", false, status.daemon_pid,
-                                                stop_result.committed_clients,
-                                                stop_result.client_pids,
-                                                stop_result.client_count);
+                main_daemon_ctl_print_stop_json(
+                    "busy", false, status.daemon_pid, stop_result.committed_clients,
+                    stop_result.client_pids, stop_result.client_count, &status, identity);
                 return 6;
             }
             printf("daemon: NOT stopped — %u committed client(s) still use it.\n",
@@ -2748,14 +2752,16 @@ static int main_run_daemon_ctl(int argc, char **argv, const cbm_daemon_ipc_endpo
         }
         if (!stop_result.accepted) {
             if (json_output) {
-                main_daemon_ctl_print_stop_json("stopping", false, status.daemon_pid, 0, NULL, 0);
+                main_daemon_ctl_print_stop_json("stopping", false, status.daemon_pid, 0, NULL, 0,
+                                                &status, identity);
                 return 0;
             }
             printf("daemon: already stopping\n");
             return EXIT_SUCCESS;
         }
         if (json_output) {
-            main_daemon_ctl_print_stop_json("stopping", true, status.daemon_pid, 0, NULL, 0);
+            main_daemon_ctl_print_stop_json("stopping", true, status.daemon_pid, 0, NULL, 0,
+                                            &status, identity);
             return 0;
         }
         printf("daemon: stopping (pid %lu)\n", (unsigned long)status.daemon_pid);

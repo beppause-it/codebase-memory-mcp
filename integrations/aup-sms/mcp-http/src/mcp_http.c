@@ -525,7 +525,15 @@ static bool allowed_tool(const char *name) {
            strcmp(name, "query_graph") == 0 || strcmp(name, "trace_path") == 0 ||
            strcmp(name, "get_file_outline") == 0 || strcmp(name, "get_architecture") == 0;
 }
-static yyjson_mut_val *tool_schema(yyjson_mut_doc *d, const char *name) {
+/* One effective schema drives publication, validation and omitted defaults. */
+static int profile_ceiling(const config_t *c, const char *key) {
+    if (!strcmp(key, "limit") || !strcmp(key, "max_rows") || !strcmp(key, "semantic_limit"))
+        return c->results;
+    if (!strcmp(key, "depth"))
+        return c->depth;
+    return !strcmp(key, "max_output_tokens") ? c->response_max / CBM_SZ_4 : 0;
+}
+static yyjson_mut_val *tool_schema(yyjson_mut_doc *d, const config_t *c, const char *name) {
     const char *raw = cbm_mcp_tool_input_schema(name);
     yyjson_doc *schema = parse(raw);
     if (!schema) {
@@ -535,10 +543,69 @@ static yyjson_mut_val *tool_schema(yyjson_mut_doc *d, const char *name) {
     yyjson_doc_free(schema);
     yyjson_mut_val *props = yyjson_mut_obj_get(s, "properties");
     yyjson_mut_obj_remove_key(props, "project");
+    const char *bounded[] = {"limit", "max_rows", "semantic_limit", "depth", "max_output_tokens"};
+    for (size_t k = 0; k < sizeof(bounded) / sizeof(bounded[0]); k++) {
+        const char *key = bounded[k];
+        yyjson_mut_val *spec = yyjson_mut_obj_get(props, key);
+        if (!spec)
+            continue;
+        int64_t low = yyjson_mut_get_sint(yyjson_mut_obj_get(spec, "minimum"));
+        if (strcmp(key, "max_output_tokens") && low < 1)
+            low = 1;
+        int64_t high = profile_ceiling(c, key);
+        yyjson_mut_val *native_max = yyjson_mut_obj_get(spec, "maximum");
+        if (native_max && yyjson_mut_get_sint(native_max) < high)
+            high = yyjson_mut_get_sint(native_max);
+        /* Preserve the HTTP default output budget, not the native 3200-token default. */
+        yyjson_mut_val *def = yyjson_mut_obj_get(spec, "default");
+        int64_t selected =
+            !strcmp(key, "max_output_tokens") ? high : (def ? yyjson_mut_get_sint(def) : high);
+        if (selected > high)
+            selected = high;
+        if (selected < low)
+            selected = low;
+        yyjson_mut_obj_remove_key(spec, "minimum");
+        yyjson_mut_obj_remove_key(spec, "maximum");
+        yyjson_mut_obj_remove_key(spec, "default");
+        yyjson_mut_obj_add_int(d, spec, "minimum", low);
+        yyjson_mut_obj_add_int(d, spec, "maximum", high);
+        yyjson_mut_obj_add_int(d, spec, "default", selected);
+        if (!strcmp(key, "max_rows")) {
+            yyjson_mut_obj_remove_key(spec, "description");
+            yyjson_mut_obj_add_str(
+                d, spec, "description",
+                "Positive visible row limit bounded by the HTTP profile; zero is not allowed.");
+        }
+    }
     /* Account-cache cursors are not source attestations. This profile uses
      * bounded offset paging over immutable artifacts. */
     yyjson_mut_obj_remove_key(props, "cursor");
+    if (!strcmp(name, "query_graph")) {
+        yyjson_mut_val *offset = yyjson_mut_obj_get(props, "offset");
+        yyjson_mut_obj_remove_key(offset, "description");
+        yyjson_mut_obj_add_str(d, offset, "description",
+                               "Offset paging within the attested artifact; cursors are not "
+                               "supported by this HTTP profile.");
+    }
+    const char *paths[] = {"path", "file_path"};
+    for (size_t k = 0; k < sizeof(paths) / sizeof(paths[0]); k++) {
+        yyjson_mut_val *spec = yyjson_mut_obj_get(props, paths[k]);
+        if (spec) {
+            yyjson_mut_obj_remove_key(spec, "minLength");
+            yyjson_mut_obj_add_uint(d, spec, "minLength", SKIP_ONE);
+            yyjson_mut_obj_remove_key(spec, "description");
+            yyjson_mut_obj_add_str(d, spec, "description",
+                                   "Source-relative path using forward slashes; no absolute path, "
+                                   "backslash or parent traversal.");
+        }
+    }
     if (!strcmp(name, "get_architecture")) {
+        yyjson_mut_val *aspects = yyjson_mut_obj_get(props, "aspects");
+        yyjson_mut_obj_remove_key(aspects, "description");
+        yyjson_mut_obj_add_str(
+            d, aspects, "description",
+            "Defaults to languages/packages/entry_points. Choose only published aspects; "
+            "system_structure and behavior evidence are unavailable in this HTTP profile.");
         const char *disabled[] = {"entry_node_id", "target_node_id", "expected_generation",
                                   "include_behavior_evidence"};
         for (int i = 0; i < CBM_SZ_4; i++) {
@@ -556,6 +623,12 @@ static yyjson_mut_val *tool_schema(yyjson_mut_doc *d, const char *name) {
     yyjson_mut_val *source = yyjson_mut_obj(d);
     yyjson_mut_obj_add_str(d, source, "type", "string");
     yyjson_mut_obj_add_uint(d, source, "minLength", SKIP_ONE);
+    yyjson_mut_obj_add_uint(d, source, "maxLength", ASMS_IDENTIFIER_MAX);
+    yyjson_mut_obj_add_str(d, source, "pattern", "^[A-Za-z0-9_-]+$");
+    yyjson_mut_obj_add_str(d, source, "description",
+                           "Exact source identifier supplied by the integration for this project. "
+                           "Always a string, including numeric-looking IDs. Do not invent it; the "
+                           "source must have an active attested binding.");
     yyjson_mut_obj_add_val(d, props, "source_id", source);
     yyjson_mut_val *required = yyjson_mut_obj_remove_key(s, "required");
     yyjson_mut_val *new_req = yyjson_mut_arr(d);
@@ -573,7 +646,16 @@ static yyjson_mut_val *tool_schema(yyjson_mut_doc *d, const char *name) {
     yyjson_mut_obj_add_bool(d, s, "additionalProperties", false);
     return s;
 }
-static char *catalog(void) {
+static yyjson_doc *effective_schema(const config_t *c, const char *name) {
+    yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
+    yyjson_mut_doc_set_root(d, tool_schema(d, c, name));
+    char *raw = yyjson_mut_write(d, 0, NULL);
+    yyjson_doc *out = parse(raw);
+    free(raw);
+    yyjson_mut_doc_free(d);
+    return out;
+}
+static char *catalog(const config_t *c) {
     char *native = cbm_mcp_tools_list();
     yyjson_doc *nd = parse(native);
     free(native);
@@ -593,7 +675,22 @@ static char *catalog(void) {
         }
         yyjson_mut_val *copy = yyjson_val_mut_copy(d, tool);
         yyjson_mut_obj_remove_key(copy, "inputSchema");
-        yyjson_mut_obj_add_val(d, copy, "inputSchema", tool_schema(d, name));
+        yyjson_mut_obj_add_val(d, copy, "inputSchema", tool_schema(d, c, name));
+        if (!strcmp(name, "query_graph")) {
+            yyjson_mut_obj_remove_key(copy, "description");
+            yyjson_mut_obj_add_str(
+                d, copy, "description",
+                "Read-only Cypher over an attested source. Defaults and positive row limits follow "
+                "this HTTP profile; use offset paging.");
+        }
+        if (!strcmp(name, "get_architecture")) {
+            yyjson_mut_obj_remove_key(copy, "description");
+            yyjson_mut_obj_add_str(
+                d, copy, "description",
+                "Synchronous bounded static architecture of an attested source. Use only the "
+                "published aspects and optional source-relative path. This HTTP profile does not "
+                "support system_structure, behavior evidence or job polling.");
+        }
         yyjson_mut_arr_append(tools, copy);
     }
     yyjson_mut_obj_add_val(d, root, "tools", tools);
@@ -1063,99 +1160,102 @@ static bool schema_value_valid(yyjson_val *spec, yyjson_val *value) {
     return (!minimum || number >= yyjson_get_sint(minimum)) &&
            (!maximum || number <= yyjson_get_sint(maximum));
 }
-static bool integer_ceiling_valid(config_t *c, const char *key, yyjson_val *value) {
-    if (!yyjson_is_int(value)) {
-        return true;
-    }
-    int64_t n = yyjson_get_sint(value);
-    if (strcmp(key, "limit") == 0 || strcmp(key, "max_rows") == 0 ||
-        strcmp(key, "semantic_limit") == 0) {
-        return n > 0 && n <= c->results;
-    }
-    if (strcmp(key, "depth") == 0) {
-        return n >= SKIP_ONE && n <= c->depth;
-    }
-    return strcmp(key, "max_output_tokens") != 0 || n <= c->response_max / CBM_SZ_4;
+typedef struct {
+    const char *reason, *expected_type;
+    char parameter[ASMS_IDENTIFIER_MAX + 1];
+    bool has_min, has_max;
+    int64_t minimum, maximum;
+} argument_issue_t;
+
+static bool reject_argument(argument_issue_t *issue, const char *key, const char *reason,
+                            yyjson_val *spec) {
+    issue->reason = reason;
+    (void)snprintf(issue->parameter, sizeof(issue->parameter), "%s", key);
+    issue->expected_type = str(spec, "type");
+    yyjson_val *low = yyjson_obj_get(spec, "minimum"), *high = yyjson_obj_get(spec, "maximum");
+    issue->has_min = yyjson_is_int(low);
+    issue->has_max = yyjson_is_int(high);
+    issue->minimum = yyjson_get_sint(low);
+    issue->maximum = yyjson_get_sint(high);
+    return false;
 }
-static bool argument_valid(config_t *c, const char *name, const char *key, yyjson_val *value,
-                           yyjson_val *props) {
-    if (strcmp(key, "source_id") == 0) {
-        return true;
-    }
-    if (strcmp(key, "project") == 0 || strcmp(key, "cursor") == 0) {
-        return false;
-    }
-    yyjson_val *spec = yyjson_obj_get(props, key);
-    if (!spec || !schema_value_valid(spec, value) || !integer_ceiling_valid(c, key, value)) {
-        return false;
-    }
-    if ((strcmp(key, "file_path") == 0 || strcmp(key, "path") == 0) && yyjson_is_str(value) &&
-        !relative_path_valid(yyjson_get_str(value))) {
-        return false;
-    }
-    return strcmp(name, "get_architecture") != 0 || architecture_arg_valid(key, value);
-}
-static bool args_valid(config_t *c, const char *name, yyjson_val *args) {
-    if (!yyjson_is_obj(args) || !ident(str(args, "source_id"))) {
-        return false;
-    }
-    yyjson_doc *schema = parse(cbm_mcp_tool_input_schema(name));
-    if (!schema) {
-        return false;
-    }
-    yyjson_val *root = yyjson_doc_get_root(schema);
-    yyjson_val *props = yyjson_obj_get(root, "properties");
-    size_t i;
-    size_t n;
-    yyjson_val *key;
-    yyjson_val *value;
+static bool args_valid(const config_t *c, const char *name, yyjson_val *args,
+                       argument_issue_t *issue) {
+    if (!yyjson_is_obj(args))
+        return reject_argument(issue, "", "arguments_object_required", NULL);
+    yyjson_doc *schema = effective_schema(c, name);
+    if (!schema)
+        return reject_argument(issue, "", "effective_schema_unavailable", NULL);
+    yyjson_val *root = yyjson_doc_get_root(schema), *props = yyjson_obj_get(root, "properties");
+    size_t i, n;
+    yyjson_val *key, *value;
     bool ok = true;
     yyjson_obj_foreach(args, i, n, key, value) {
-        if (!argument_valid(c, name, yyjson_get_str(key), value, props)) {
-            ok = false;
-            break;
+        const char *parameter = yyjson_get_str(key);
+        yyjson_val *spec = yyjson_obj_get(props, parameter);
+        if (!spec) {
+            /* Unknown keys may contain caller data: never reflect them. */
+            ok = reject_argument(issue, "<unknown>", "additional_property_not_allowed", NULL);
+        } else if (!schema_value_valid(spec, value)) {
+            const char *type = str(spec, "type");
+            bool type_ok = (!strcmp(type, "integer") && yyjson_is_int(value)) ||
+                           (!strcmp(type, "string") && yyjson_is_str(value)) ||
+                           (!strcmp(type, "boolean") && yyjson_is_bool(value)) ||
+                           (!strcmp(type, "array") && yyjson_is_arr(value));
+            const char *reason = type_ok ? "enum" : "type";
+            if (yyjson_is_int(value) && yyjson_obj_get(spec, "minimum") &&
+                yyjson_get_sint(value) < yyjson_get_sint(yyjson_obj_get(spec, "minimum")))
+                reason = "minimum";
+            else if (yyjson_is_int(value) && yyjson_obj_get(spec, "maximum") &&
+                     yyjson_get_sint(value) > yyjson_get_sint(yyjson_obj_get(spec, "maximum")))
+                reason = "maximum";
+            ok = reject_argument(issue, parameter, reason, spec);
+        } else if (!strcmp(parameter, "source_id") && !ident(str(args, "source_id"))) {
+            ok = reject_argument(issue, parameter, "source_identifier_format", spec);
+        } else if ((!strcmp(parameter, "file_path") || !strcmp(parameter, "path")) &&
+                   !relative_path_valid(yyjson_get_str(value))) {
+            ok = reject_argument(issue, parameter, "source_relative_path_required", spec);
+        } else if (!strcmp(name, "get_architecture") && !architecture_arg_valid(parameter, value)) {
+            ok = reject_argument(issue, parameter, "http_architecture_policy", spec);
         }
+        if (!ok)
+            break;
     }
     yyjson_arr_foreach(yyjson_obj_get(root, "required"), i, n, value) {
+        if (!ok)
+            break;
         const char *required = yyjson_get_str(value);
-        if (strcmp(required, "project") != 0 && !yyjson_obj_get(args, required)) {
-            ok = false;
-        }
+        if (!yyjson_obj_get(args, required))
+            ok = reject_argument(issue, required, "required", yyjson_obj_get(props, required));
     }
+    /* expected_type is schema-backed; expose only immutable vocabulary. */
+    const char *type = issue->expected_type;
+    issue->expected_type = type && !strcmp(type, "integer")   ? "integer"
+                           : type && !strcmp(type, "string")  ? "string"
+                           : type && !strcmp(type, "boolean") ? "boolean"
+                           : type && !strcmp(type, "array")   ? "array"
+                                                              : "";
     yyjson_doc_free(schema);
     return ok;
 }
-
 static char *native_args(config_t *c, yyjson_val *args, const char *project, const char *tool) {
     yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *v = yyjson_val_mut_copy(d, args);
     yyjson_mut_obj_remove_key(v, "source_id");
     yyjson_mut_obj_add_strcpy(d, v, "project", project);
-    const char *limit_key = strcmp(tool, "query_graph") == 0 ? "max_rows" : "limit";
-    yyjson_doc *schema = parse(cbm_mcp_tool_input_schema(tool));
-    yyjson_val *spec =
-        yyjson_obj_get(yyjson_obj_get(yyjson_doc_get_root(schema), "properties"), limit_key);
-    if (spec && !yyjson_mut_obj_get(v, limit_key)) {
-        int native_default = yyjson_get_int(yyjson_obj_get(spec, "default"));
-        int native_max = yyjson_get_int(yyjson_obj_get(spec, "maximum"));
-        int selected =
-            native_default > 0 && native_default < c->results ? native_default : c->results;
-        if (native_max > 0 && selected > native_max) {
-            selected = native_max;
-        }
-        yyjson_mut_obj_add_int(d, v, limit_key, selected);
+    yyjson_doc *schema = effective_schema(c, tool);
+    if (!schema) {
+        yyjson_mut_doc_free(d);
+        return NULL;
+    }
+    yyjson_val *props = yyjson_obj_get(yyjson_doc_get_root(schema), "properties");
+    const char *bounded[] = {"limit", "max_rows", "semantic_limit", "depth", "max_output_tokens"};
+    for (size_t i = 0; i < sizeof(bounded) / sizeof(bounded[0]); i++) {
+        yyjson_val *def = yyjson_obj_get(yyjson_obj_get(props, bounded[i]), "default");
+        if (def && !yyjson_mut_obj_get(v, bounded[i]))
+            yyjson_mut_obj_add_val(d, v, bounded[i], yyjson_val_mut_copy(d, def));
     }
     yyjson_doc_free(schema);
-    if (!strcmp(tool, "trace_path") && !yyjson_mut_obj_get(v, "depth")) {
-        yyjson_mut_obj_add_int(d, v, "depth", c->depth < CBM_SZ_3 ? c->depth : CBM_SZ_3);
-    }
-    if (strcmp(tool, "get_architecture") != 0 && strcmp(tool, "get_graph_schema") != 0 &&
-        strcmp(tool, "get_file_outline") != 0 && !yyjson_mut_obj_get(v, "max_output_tokens")) {
-        yyjson_mut_obj_add_int(d, v, "max_output_tokens",
-                               c->response_max / CBM_SZ_4 > ASMS_OUTPUT_TOKEN_MAX
-                                   ? ASMS_OUTPUT_TOKEN_MAX
-                                   : c->response_max / CBM_SZ_4);
-    }
     yyjson_mut_doc_set_root(d, v);
     char *out = yyjson_mut_write(d, 0, NULL);
     yyjson_mut_doc_free(d);
@@ -1308,7 +1408,8 @@ static int worker(void) {
     yyjson_val *args = yyjson_obj_get(root, "arguments");
     bool verify_only = !strcmp(tool, "__verify");
     char *diagnostic = NULL;
-    bool valid = (verify_only || (allowed_tool(tool) && args_valid(&cfg, tool, args))) &&
+    argument_issue_t issue = {0};
+    bool valid = (verify_only || (allowed_tool(tool) && args_valid(&cfg, tool, args, &issue))) &&
                  attested_index(&cfg, body, &index) && verify_index(index, &diagnostic);
     char *result = NULL;
     if (valid && verify_only) {
@@ -1740,10 +1841,40 @@ static char *execute_tool_call(runtime_t *rt, yyjson_val *root, yyjson_val *id, 
     yyjson_val *args = yyjson_obj_get(params, "arguments");
     const char *name = str(params, "name");
     const char *source = str(args, "source_id");
-    if (!allowed_tool(name) || !args_valid(&rt->cfg, name, args)) {
+    argument_issue_t issue = {.reason = "tool_not_allowed", .parameter = "", .expected_type = ""};
+    if (!allowed_tool(name) || !args_valid(&rt->cfg, name, args, &issue)) {
         code = "TOOL_ARGUMENTS_REJECTED";
         message = "Read-only native tool, source_id and bounded native schema arguments required";
-        return error_json(rt, code, message, id);
+        char *legacy = error_json(rt, code, message, id);
+        yyjson_doc *input = parse(legacy);
+        yyjson_mut_doc *d = input ? yyjson_doc_mut_copy(input, NULL) : NULL;
+        if (!d) {
+            yyjson_doc_free(input);
+            return legacy;
+        }
+        yyjson_mut_val *env = yyjson_mut_doc_get_root(d);
+        if (id)
+            env = yyjson_mut_obj_get(yyjson_mut_obj_get(env, "error"), "data");
+        yyjson_mut_val *details = yyjson_mut_obj_get(env, "details");
+        yyjson_mut_obj_add_strcpy(d, details, "reason", issue.reason);
+        yyjson_mut_obj_add_strcpy(d, details, "tool", allowed_tool(name) ? name : "<unknown>");
+        yyjson_mut_obj_add_strcpy(d, details, "parameter", issue.parameter);
+        char pointer[ASMS_IDENTIFIER_MAX + 32];
+        (void)snprintf(pointer, sizeof(pointer), "/arguments%s%s", issue.parameter[0] ? "/" : "",
+                       issue.parameter);
+        yyjson_mut_obj_add_strcpy(d, details, "path", pointer);
+        yyjson_mut_obj_add_strcpy(d, details, "expected_type", issue.expected_type);
+        if (issue.has_min)
+            yyjson_mut_obj_add_int(d, details, "minimum", issue.minimum);
+        if (issue.has_max)
+            yyjson_mut_obj_add_int(d, details, "maximum", issue.maximum);
+        char *out = yyjson_mut_write(d, 0, NULL);
+        yyjson_mut_doc_free(d);
+        yyjson_doc_free(input);
+        if (!out)
+            return legacy;
+        free(legacy);
+        return out;
     }
     int64_t revision;
     bool revoked;
@@ -1817,7 +1948,7 @@ static char *protocol_method(runtime_t *rt, cbm_http_req_t *req, yyjson_val *roo
         return out;
     }
     if (!strcmp(method, "tools/list")) {
-        char *list = catalog();
+        char *list = catalog(&rt->cfg);
         if (list) {
             out = rpc_result(id, list);
         }
