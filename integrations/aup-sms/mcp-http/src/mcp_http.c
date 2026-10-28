@@ -1,5 +1,6 @@
 /* CR-27 native, opt-in machine transport. No Lens/ASMS database dependencies. */
 #include "mcp_http.h"
+#include "distributed_error.h"
 #include "daemon/ipc.h"
 #include "foundation/compat.h"
 #include "foundation/constants.h"
@@ -1971,7 +1972,7 @@ static char *route_request(runtime_t *rt, cbm_http_req_t *req, int *status, int6
     }
     return control_route(rt, req, status, revision, health_path, sources);
 }
-static void serve_request(runtime_t *rt, cbm_http_conn_t *conn, cbm_http_req_t *req) {
+static void reset_request_diagnostic(runtime_t *rt) {
     rt->db_error = 0;
     free(rt->db_message);
     rt->db_message = NULL;
@@ -1980,6 +1981,9 @@ static void serve_request(runtime_t *rt, cbm_http_conn_t *conn, cbm_http_req_t *
     free(rt->verification_failure);
     rt->verification_failure = NULL;
     rt->audit_code = NULL;
+    rt->correlation[0] = '\0';
+}
+static void serve_request(runtime_t *rt, cbm_http_conn_t *conn, cbm_http_req_t *req) {
     unsigned char random[CBM_SZ_32];
     if (!cbm_secure_random(random, sizeof(random))) {
         cbm_http_replyf(conn, ASMS_HTTP_UNAVAILABLE, JSON_HEADERS, "{}");
@@ -2004,11 +2008,19 @@ static void serve_request(runtime_t *rt, cbm_http_conn_t *conn, cbm_http_req_t *
         (void)snprintf(headers, sizeof(headers), JSON_HEADERS "X-Request-Id: %s\r\n",
                        rt->correlation);
     }
+    char *oversized = NULL;
     if (out && strlen(out) > (size_t)rt->cfg.response_max) {
-        free(out);
+        oversized = out;
         out = error_json(rt, "RESPONSE_LIMIT", "Complete response exceeds configured byte limit",
                          NULL);
         status = ASMS_HTTP_TOO_LARGE;
+    }
+    char *diagnostic = cbm_asms_distributed_error(out, oversized, rt->correlation, status,
+                                                  (size_t)rt->cfg.response_max);
+    free(oversized);
+    if (diagnostic) {
+        free(out);
+        out = diagnostic;
     }
     cbm_http_reply_buf(conn, status, headers, out ? out : "", out ? strlen(out) : 0);
     free(out);
@@ -2082,6 +2094,7 @@ static void startup_error(runtime_t *rt, const char *code, const char *message) 
     yyjson_mut_doc_free(md);
 }
 static void handle_connection(runtime_t *rt, cbm_http_conn_t *conn) {
+    reset_request_diagnostic(rt);
     cbm_http_req_t req = {0};
     int rc = cbm_httpd_read_request(conn, &req);
     if (rc == 0) {
@@ -2092,6 +2105,14 @@ static void handle_connection(runtime_t *rt, cbm_http_conn_t *conn) {
             digest_hex(random, rt->correlation);
         }
         char *err = error_json(rt, "HTTP_PARSE_FAILED", "HTTP framing or headers rejected", NULL);
+        char *diagnostic = rt->correlation[0]
+                               ? cbm_asms_distributed_error(err, NULL, rt->correlation, rc,
+                                                            (size_t)rt->cfg.response_max)
+                               : NULL;
+        if (diagnostic) {
+            free(err);
+            err = diagnostic;
+        }
         cbm_http_reply_buf(conn, rc, JSON_HEADERS, err ? err : "{}", err ? strlen(err) : CBM_SZ_2);
         free(err);
     }

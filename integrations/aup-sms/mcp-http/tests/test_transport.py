@@ -403,6 +403,45 @@ class Transport(unittest.TestCase):
             response = self.s.mutate("source-a", self.s.attestation(self.one, **change))
             self.assertEqual(response[0], 409, response)
 
+    def test_distributed_source_failure_retains_original_legacy_envelope(self):
+        status, result, headers = self.s.rpc('tools/call', dict(name='get_graph_schema', arguments={'source_id':'7'}))
+        self.assertEqual(status, 400, result)
+        self.assertEqual(result['error']['code'], -32000)
+        native = result['error']['data']
+        diagnostic = native['diagnostic']
+        self.assertEqual(native['code'], 'SOURCE_NOT_ACTIVE')
+        self.assertEqual(diagnostic['primary']['code'], native['code'])
+        self.assertEqual(diagnostic['primary']['message'], native['message'])
+        self.assertEqual(diagnostic['origin']['request_id'], headers['X-Request-Id'])
+        self.assertEqual(diagnostic['origin']['correlation_id'], native['correlation_id'])
+        self.assertEqual(diagnostic['primary']['stack']['availability'], 'unavailable')
+        self.assertFalse(diagnostic['completeness']['complete'])
+        self.assertNotIn(self.s.data, json.dumps(result))
+        self.assertNotIn(self.s.control, json.dumps(result))
+
+    def test_malformed_request_cannot_reuse_previous_artifact_cause(self):
+        index = dict(self.one, generation='wrong-native-generation')
+        self.s.config['indexes'] = [index]; self.s.write_config()
+        previous = self.s.mutate('source-a', self.s.attestation(index))
+        self.assertEqual(previous[0], 409, previous)
+        self.assertIn('ARTIFACT_IDENTITY_OR_INTEGRITY_FAILED', json.dumps(previous[1]))
+        conn = http.client.HTTPConnection('127.0.0.1', self.s.port, timeout=20)
+        try:
+            conn.putrequest('POST', self.s.base + '/mcp')
+            conn.putheader('Authorization', 'first')
+            conn.putheader('Authorization', 'second')
+            conn.putheader('Content-Length', '0')
+            conn.endheaders()
+            response = conn.getresponse()
+            payload = json.loads(response.read())
+        finally:
+            conn.close()
+        self.assertEqual(payload['code'], 'HTTP_PARSE_FAILED', payload)
+        self.assertEqual(payload['causes'], [])
+        self.assertNotEqual(payload['request_id'], previous[1]['request_id'])
+        self.assertEqual(payload['diagnostic']['primary']['children'], [])
+        self.assertNotIn('ARTIFACT_IDENTITY_OR_INTEGRITY_FAILED', json.dumps(payload))
+
     def artifact_with_projects(self, names=(), generation=None, symbol="shadow-test"):
         path = self.work / (secrets.token_hex(6) + ".db")
         index = fixture(path, symbol)

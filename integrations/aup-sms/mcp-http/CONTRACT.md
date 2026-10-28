@@ -124,3 +124,25 @@ it never selects another artifact. Health requires the control credential.
 Release qualification needs Windows + actual Ubuntu evidence and independent
 Architect Release Gate. No commit/push or ASMS VERIFIED state is implied.
 
+# Distributed error compatibility (CR-37)
+
+Failed HTTP responses retain their legacy status, code, message and causes.
+The additive `aup.exception` version `1.0` envelope is exposed as
+`error.data.diagnostic` for JSON-RPC errors, `result.structuredContent.diagnostic`
+for failed tool results, and `diagnostic` for control-plane errors.
+The canonical schema belongs to Agent OS at
+`contracts/distributed-exception/1.0/schema.json`; this adapter does not define a
+second schema. Native returned errors preserve their real fields and identifiers.
+No native stack is fabricated: availability is `unavailable` and completeness is
+false. Message, detail and cause truncation is explicitly reported. If the
+additional envelope cannot fit the configured response budget, the original
+legacy error remains available. A response-size failure retains the original
+error in the diagnostic when the budget permits; unavailable full references are
+reported explicitly. Request diagnostics reset before HTTP parsing so malformed
+requests cannot inherit an earlier request's causes.
+
+Consumers must read the bounded non-success response body before closing their
+HTTP stream and preserve the legacy body when no diagnostic is supplied. The
+Agent OS client correction is tracked separately in Agent OS CR24; producer
+support alone does not establish end-to-end error display.
+

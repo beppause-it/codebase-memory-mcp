@@ -99,3 +99,59 @@ artefatti senza shadow e i controlli autenticativi/tenant.
 Non vengono dichiarati commit, push, installazione, attivazione dei binding o
 verifica consumer. Gli esiti finali di build e collaudo vanno registrati prima
 dell'adozione e del pin ASMS; le modifiche restano non committate.
+
+## Build e collaudo owner conclusi - 2026-10-28
+
+La correzione e' ora nel commit sorgente
+`a7211dbb33dfc5d8fca77d03507d1135581ae8e1` (`fix multi sources`), trovato gia'
+committato alla ripresa. Questa sessione non ha creato commit o push. La build
+e' stata eseguita da un working tree pulito; questa nota documentale e'
+successiva alla compilazione.
+
+Build C ufficiale **con UI**, eseguita da zero e conclusa con exit code 0:
+
+```bash
+scripts/build.sh --with-ui --version 0.12.0-asms.cr36.1 \
+  BUILD_DIR=build/cr36-final CC=clang CXX=clang++
+```
+
+Su questo host e' stato usato MSYS2 CLANG64, con Node/npm, il make locale gia'
+disponibile e le utility Git nel PATH. Il target con UI usa il response file
+gia' presente nel commit, evitando il limite della riga di comando Windows.
+Non si tratta della sola build JavaScript: gli asset Lens sono incorporati
+nell'eseguibile C e verificati tramite HTTP.
+
+- Binario: `build/cr36-final/codebase-memory-mcp.exe`.
+- Versione verificata con `--version`: `0.12.0-asms.cr36.1`.
+- Dimensione: 335353856 byte.
+- SHA-256 del binario:
+  `f8924842dec0189c79671916ec666f7d0e243e14d1d0a1142ac6a4a212e154cf`.
+- Evidenza macchina: `build/cr36-final-evidence.json`.
+- Log build: `build/cr36-final-build.log`.
+
+| Verifica sul nuovo binario | Esito | Log |
+|---|---|---|
+| Intera suite HTTP nativa | 39 test passati, 524.377 secondi, exit 0 | `build/cr36-final-http-tests.log` |
+| Lifecycle Windows e health | start/status/restart/stop passati, exit 0 | `build/cr36-final-service.log` |
+| UI nativa | HTML Lens e 2 asset principali serviti; processo e cleanup conclusi con exit 0 | `build/cr36-final-ui-smoke.log` |
+| Formatting C | `clang-format --dry-run --Werror` passato | output terminale |
+| Sintassi test | `python -m py_compile` passato | output terminale |
+| Diff | `git diff --check` passato | output terminale |
+
+La suite comprende il client MCP SDK standard, compatibilita' stdio, due
+sorgenti su artefatti distinti, due sorgenti con shadow e revoca indipendente,
+rifiuto di generazioni/checksum/integrita' errati e di progetti/shadow estranei,
+conservazione di errori/cause/correlazione e controlli autenticativi/tenant.
+I ResourceWarning Python su connessioni SQLite delle fixture restano visibili
+nel log originale; non sono stati soppressi e non hanno causato test falliti.
+Lo smoke UI prova il servizio di HTML/asset, non un collaudo visuale o GPU.
+
+Il task owner di compilazione C con UI e collaudo e' concluso. Non sono stati
+sostituiti `build/codebase-memory.exe`, il binario consumer, i suoi pin o i
+binding operativi. L'eseguibile qualificato e' nella directory indicata sopra.
+
+La verifica consumer resta distinta: al 2026-10-28 i due assegnamenti ASMS
+indicati sopra usano ancora `$index->lens_generation`. Questa build non
+aggira quel mismatch: ASMS deve inviare la distinta generazione nativa e poi
+verificare il binding reale sul binario adottato. Non viene dichiarato
+`VERIFIED` il percorso operativo ASMS.
