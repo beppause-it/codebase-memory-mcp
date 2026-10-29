@@ -1,6 +1,7 @@
 # CR39 — Schemi effettivi del profilo MCP HTTP
 
-29 ottobre 2026. Implementazione e qualificazione in corso.
+29 ottobre 2026. Implementazione disponibile e qualificata Windows.
+Collaudo consumer ASMS/Agent OS e end-to-end Linux non dichiarati.
 
 ## Correzione
 
@@ -75,9 +76,11 @@ Configurazione predefinita, intervalli/default effettivamente pubblicati:
 | trace_path.depth | 1–15, default 3 | 1–8, default 3 |
 | query_graph.max_output_tokens | 128–1000000, default non pubblicato | 128–262144, default 262144 |
 
-Tre test mirati PASS, `build/cr39-focused-tests.log`. Anche i test CR39
-sull'EXE finale stanno passando nella suite completa, log
-`build/cr39-http-tests.log`. La UI finale serve HTML e asset ed esce
+Tre test mirati PASS, `build/cr39-focused-tests.log`. Suite completa sul binario
+finale: 44 test PASS, 465.847 secondi, exit 0,
+`build/cr39-http-tests.log`. Include SDK standard, stdio invariato, limiti
+ricaricati, default eseguiti, diagnostici, auth e isolamento sorgenti.
+La UI finale serve HTML e asset ed esce
 correttamente: PASS, `build/cr39-ui-smoke.log`. Controllo sintattico Linux
 finale con GCC -Wall -Wextra -Werror: PASS, `build/cr39-linux-syntax.log`;
 questo non costituisce collaudo end-to-end Linux.
